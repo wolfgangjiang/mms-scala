@@ -1,0 +1,85 @@
+INF [20110107-11:18:37.638] actors: telnet connected
+DEB [20110107-11:18:37.679] actors: atd dial up start
+INF [20110107-11:18:37.680] actors: atd dial up finish
+INF [20110107-11:18:42.685] actors: start lcp process
+DEB [20110107-11:18:42.685] actors: ppp recipient start
+DEB [20110107-11:18:42.685] actors: send lcp config request
+TRA [20110107-11:18:42.732] network: A valid ppp packet created.
+TRA [20110107-11:18:42.735] actors: send out ppp packet:FF 03 C0 21 01 11 00 0A 02 06 00 00 00 00
+DEB [20110107-11:18:42.738] actors: PPP packet received:FF 03 C0 21 01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23
+TRA [20110107-11:18:42.757] actors: other exception
+TRA [20110107-11:18:42.757] actors: scala.actors.SuspendActorControl
+INF [20110107-11:18:42.757] actors: configReq received, sending a configAck
+TRA [20110107-11:18:42.766] actors: send out ppp packet:FF 03 C0 21 02 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23
+TRA [20110107-11:19:01.768] network: A valid ppp packet created.
+DEB [20110107-11:19:01.773] actors: PPP packet received:FF 03 C0 21 01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23
+INF [20110107-11:19:01.776] actors: configReq received, sending a configAck
+TRA [20110107-11:19:01.780] actors: send out ppp packet:FF 03 C0 21 02 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23
+TRA [20110107-11:19:04.778] network: A valid ppp packet created.
+DEB [20110107-11:19:04.781] actors: PPP packet received:FF 03 C0 21 02 11 00 0A 02 06 00 00 00 00
+INF [20110107-11:19:04.782] actors: configAck received, process pap
+INF [20110107-11:19:09.784] actors: start pap process
+TRA [20110107-11:19:09.789] actors: send out ppp packet:FF 03 C0 23 01 12 00 06 00 00
+TRA [20110107-11:19:13.788] network: A valid ppp packet created.
+DEB [20110107-11:19:13.791] actors: PPP packet received:FF 03 C0 23 02 12 00 0D 08 57 65 6C 63 6F 6D 65 21
+INF [20110107-11:19:13.793] actors: pap act received, start ipcp
+INF [20110107-11:19:13.794] actors: start ipcp process
+TRA [20110107-11:19:16.794] network: A valid ppp packet created.
+DEB [20110107-11:19:16.798] actors: PPP packet received:FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F
+TRA [20110107-11:19:16.802] actors: send out ppp packet:FF 03 80 21 01 13 00 0A 03 06 00 00 00 00
+INF [20110107-11:19:16.807] actors: ipcp req received and sending an ipcp ack
+TRA [20110107-11:19:16.810] actors: send out ppp packet:FF 03 80 21 02 01 00 0A 03 06 C0 A8 6F 6F
+INF [20110107-11:19:16.812] actors: start ipcp process
+TRA [20110107-11:19:19.801] network: A valid ppp packet created.
+DEB [20110107-11:19:19.804] actors: PPP packet received:FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F
+TRA [20110107-11:19:19.815] actors: send out ppp packet:FF 03 80 21 01 14 00 0A 03 06 00 00 00 00
+INF [20110107-11:19:19.817] actors: ipcp req received and sending an ipcp ack
+TRA [20110107-11:19:19.819] actors: send out ppp packet:FF 03 80 21 02 01 00 0A 03 06 C0 A8 6F 6F
+INF [20110107-11:19:19.821] actors: start ipcp process
+TRA [20110107-11:19:22.808] network: A valid ppp packet created.
+DEB [20110107-11:19:22.810] actors: PPP packet received:FF 03 80 21 03 13 00 0A 03 06 0A 9E FC 89
+TRA [20110107-11:19:22.824] actors: send out ppp packet:FF 03 80 21 01 15 00 0A 03 06 00 00 00 00
+INF [20110107-11:19:22.826] actors: ipcp nak received
+TRA [20110107-11:19:22.829] actors: send out ppp packet:FF 03 80 21 01 16 00 0A 03 06 0A 9E FC 89
+INF [20110107-11:19:22.831] actors: start ipcp process
+TRA [20110107-11:19:25.814] network: A valid ppp packet created.
+DEB [20110107-11:19:25.817] actors: PPP packet received:FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F
+TRA [20110107-11:19:25.834] actors: send out ppp packet:FF 03 80 21 01 17 00 0A 03 06 00 00 00 00
+INF [20110107-11:19:25.836] actors: ipcp req received and sending an ipcp ack
+TRA [20110107-11:19:25.838] actors: send out ppp packet:FF 03 80 21 02 01 00 0A 03 06 C0 A8 6F 6F
+INF [20110107-11:19:25.840] actors: start ipcp process
+TRA [20110107-11:19:28.820] network: A valid ppp packet created.
+DEB [20110107-11:19:28.823] actors: PPP packet received:FF 03 80 21 03 14 00 0A 03 06 0A 9E FC 89
+TRA [20110107-11:19:28.843] actors: send out ppp packet:FF 03 80 21 01 18 00 0A 03 06 00 00 00 00
+INF [20110107-11:19:28.845] actors: ipcp nak received
+TRA [20110107-11:19:28.848] actors: send out ppp packet:FF 03 80 21 01 19 00 0A 03 06 0A 9E FC 89
+INF [20110107-11:19:28.850] actors: start ipcp process
+TRA [20110107-11:19:31.826] network: A valid ppp packet created.
+DEB [20110107-11:19:31.828] actors: PPP packet received:FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F
+TRA [20110107-11:19:31.853] actors: send out ppp packet:FF 03 80 21 01 1A 00 0A 03 06 00 00 00 00
+INF [20110107-11:19:31.855] actors: ipcp req received and sending an ipcp ack
+TRA [20110107-11:19:31.857] actors: send out ppp packet:FF 03 80 21 02 01 00 0A 03 06 C0 A8 6F 6F
+INF [20110107-11:19:31.859] actors: start ipcp process
+TRA [20110107-11:19:34.832] network: A valid ppp packet created.
+DEB [20110107-11:19:34.835] actors: PPP packet received:FF 03 80 21 03 15 00 0A 03 06 0A 9E FC 89
+TRA [20110107-11:19:34.862] actors: send out ppp packet:FF 03 80 21 01 1B 00 0A 03 06 00 00 00 00
+INF [20110107-11:19:34.864] actors: ipcp nak received
+TRA [20110107-11:19:34.867] actors: send out ppp packet:FF 03 80 21 01 1C 00 0A 03 06 0A 9E FC 89
+INF [20110107-11:19:34.869] actors: start ipcp process
+TRA [20110107-11:19:37.839] network: A valid ppp packet created.
+DEB [20110107-11:19:37.842] actors: PPP packet received:FF 03 80 21 02 16 00 0A 03 06 0A 9E FC 89
+TRA [20110107-11:19:37.872] actors: send out ppp packet:FF 03 80 21 01 1D 00 0A 03 06 00 00 00 00
+INF [20110107-11:19:37.874] actors: ipcp ack received
+INF [20110107-11:19:37.875] actors: ip address granted: List(10, -98, -4, -119)
+TRA [20110107-11:19:40.845] network: A valid ppp packet created.
+DEB [20110107-11:19:40.848] actors: PPP packet received:FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F
+TRA [20110107-11:19:43.852] network: A valid ppp packet created.
+DEB [20110107-11:19:43.855] actors: PPP packet received:FF 03 80 21 03 17 00 0A 03 06 0A 9E FC 89
+TRA [20110107-11:19:46.859] network: A valid ppp packet created.
+DEB [20110107-11:19:46.862] actors: PPP packet received:FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F
+TRA [20110107-11:19:49.866] network: A valid ppp packet created.
+DEB [20110107-11:19:49.870] actors: PPP packet received:FF 03 80 21 03 18 00 0A 03 06 0A 9E FC 89
+TRA [20110107-11:19:52.874] network: A valid ppp packet created.
+DEB [20110107-11:19:52.877] actors: PPP packet received:FF 03 80 21 02 19 00 0A 03 06 0A 9E FC 89
+TRA [20110107-11:19:55.880] network: A valid ppp packet created.
+DEB [20110107-11:19:55.883] actors: PPP packet received:FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F
