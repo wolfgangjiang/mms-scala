@@ -9,7 +9,7 @@ import org.apache.commons.httpclient.methods.GetMethod
 
 import net.tambur.mms.{ MMMessage, MMConstants }
 
-
+/*
 object App {
   def main(args : Array[String]) : Unit = {
     println("Hello world.")
@@ -20,7 +20,7 @@ object App {
     }
     println("Goodbye world.")
   }
-}
+} */
 
 object KestrelHandler {
   val queue_addr = "127.0.0.1:22133"
