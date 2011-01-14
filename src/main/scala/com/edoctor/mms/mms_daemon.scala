@@ -1,7 +1,7 @@
 package com.edoctor.mms
 
 import net.rubyeye.xmemcached.utils.AddrUtil
-import net.rubyeye.xmemcached.{XMemcachedClientBuilder, MemcachedClient}
+import net.rubyeye.xmemcached.{ XMemcachedClientBuilder, MemcachedClient }
 import net.rubyeye.xmemcached.command.KestrelCommandFactory
 
 import org.apache.commons.httpclient.{ HttpClient, HttpStatus }
@@ -23,19 +23,57 @@ object App {
 } */
 
 object KestrelHandler {
-  val queue_addr = "127.0.0.1:22133"
-  
-  private val client : MemcachedClient = {
-    val the_builder = 
-      new XMemcachedClientBuilder(AddrUtil.getAddresses(queue_addr))
-    the_builder.setCommandFactory(new KestrelCommandFactory())
-    val the_client = the_builder.build
-    the_client.setPrimitiveAsString(true) // 字符串前不附加flag
-    the_client.setOptimizeGet(false) // 因为kestrel不支持bulk get
-    the_client
-  }
+  val queue_addr = read_kestrel_config("mms.conf")
+  private var i_am_fine = true
 
-  def get : String = client.get("mms")
+  def is_fine = i_am_fine
+
+  private def read_kestrel_config(filename : String) : String = {
+    try {
+      val source = io.Source.fromFile(filename)
+      source.getLines.find(line => line.startsWith("kestrel =")).get.drop(9).trim.split("\\s+").toList.mkString(":")
+    } catch {
+      case e : Exception => {
+        e.printStackTrace
+        println("Error reading from config file: " + filename)
+        exit(-1)
+      }
+    }    
+  }
+  
+  private var client : MemcachedClient = initialize_client
+
+  private def initialize_client : MemcachedClient = 
+    try {
+      val the_builder = 
+        new XMemcachedClientBuilder(AddrUtil.getAddresses(queue_addr))
+      the_builder.setCommandFactory(new KestrelCommandFactory())
+      val the_client = the_builder.build
+      the_client.setPrimitiveAsString(true) // 字符串前不附加flag
+      the_client.setOptimizeGet(false) // 因为kestrel不支持bulk get
+      the_client
+    } catch {
+      case e : Exception => {
+        i_am_fine = false
+        e.printStackTrace
+        return null
+      }
+    }
+
+  def get : String = {
+    try {
+      val value : String = client.get("mms")
+      i_am_fine = true
+      value
+    } catch {
+      case e : Exception => {
+        i_am_fine = false 
+        e.printStackTrace
+        client = initialize_client
+        return null
+      }
+    }
+  }
 
   def shutdown : Unit = client.shutdown
 }
@@ -43,25 +81,57 @@ object KestrelHandler {
 class CannotDownloadException(msg : String) extends RuntimeException
 
 object MmsDaemon {
-  private val port_config : List[(String, Int)] = List(
-    ("192.168.10.230", 964),
-    ("192.168.10.230", 966))
+  private val port_config : List[(String, Int, Int, Boolean)] = 
+    read_port_config("mms.conf")
+/*
+List(
+    ("192.168.10.230", 964, 200, true),
+    ("192.168.10.230", 966, 200, true))
+ */
 
-  private val ports = 
-    port_config.map( p => new ModemPort(p._1, p._2) ) 
+  val ports = 
+    port_config.map( p => new ModemPort(p._1, p._2, p._3, p._4) ) 
+
+  private def read_port_config(filename : String) : List[(String, Int, Int, Boolean)] = {
+    def find_port(line : String) : Option[(String, Int, Int, Boolean)] =
+      if(line.startsWith("port =")) {
+        val data = line.drop(6).trim.split("\\s+")
+        Some((data(0), data(1).toInt, data(2).toInt, (data(3) == "true")))
+      } else if(line.startsWith("port=")) {
+        val data = line.drop(5).trim.split("\\s+")
+        Some((data(0), data(1).toInt, data(2).toInt, (data(3) == "true")))
+      } else None
+
+    try {
+      val source = io.Source.fromFile(filename)
+      source.getLines.map(find_port).toList.filterNot(_ == None).map(
+        x => x.get)
+    } catch {
+      case e : Exception => {
+        e.printStackTrace
+        println("Error reading from config file: " + filename)
+        exit(-1)
+      }
+    }
+  }
 
   private def make_mms_message(request : String) : List[Byte] = {
-    val fields = request.split("\\s+")
+    val type_example = Array("a")
+    val fields : Array[String] = (new com.google.gson.Gson).fromJson(request, type_example.getClass)
     val target = fields(0)
     val subject = fields(1)
     val text = fields(2)
     val pic_url = fields(3)
     val mid_url = if(fields.length > 4) fields(4) else "none"
 
+    
     println("target is: " + target)
     println("text is: " + text)
     println("pic_url is: " + pic_url)
     println("mid_url is: " + mid_url)
+    
+
+    println("== Got from kestrel queue, text is: " + text)
 
     val pic_data = download(pic_url)
     val mid_data = if(mid_url == "none") Nil else download(mid_url)
@@ -115,7 +185,7 @@ object MmsDaemon {
   }
 
   private var selector = 
-    new StepSelector(ports.map(_.weight))
+    new SimpleSelector(ports.length)
 
   private def send(msg : List[Byte]) {
     val port = ports(selector.get)
@@ -127,8 +197,35 @@ object MmsDaemon {
     }
   }
 
+  private def write_conf : Unit = {
+    import java.io._
+    val filename = "mms.conf"
+    val kestrel_info =
+      ("# kestrel queue address and port,\n" +
+       "# where address and port must be separated with blank, not colon.\n" +
+       "kestrel = " + KestrelHandler.queue_addr.replace(':', ' ') + "\n\n")
+
+    val info_string = kestrel_info +
+      ("# Following is modem port configuration.\n" +
+       "# Each line must start with string \"port=\",\n" +
+       "# four data fields are MODEM_IP, MODEM_PORT, DAY_CAPACITY and IS_ENABLED,\n" +
+       "# and they must be separated with blank, not comma.\n" +
+       "# When system is running, this file will be automatically saved every 2 seconds.\n")
+
+    try {
+      val writer = new FileWriter(filename)
+      writer.write(info_string + ports.map(_.toString).mkString("\n"))
+      writer.close
+    } catch {
+      case e : IOException => {
+        e.printStackTrace
+        println("Error when auto writing to conf file" + filename)
+      }
+    }
+  }
+
   def main_loop : Unit = {
-    println(ports)
+    ports.foreach(p => println(p))
     var going = true
     while(going) {
       val request = KestrelHandler.get
@@ -136,15 +233,26 @@ object MmsDaemon {
         try {
           val msg : List[Byte] = make_mms_message(request)
           send(msg)
-          return
         } catch {
           case e : CannotDownloadException =>
             println("Cannot download pic " + 
                     e.getMessage + ", message was not sent")
+          case e : Exception =>
+            e.printStackTrace ; println("Error in mms request.")
         }
       }
-      // Thread.sleep(2000)
+      Thread.sleep(2000)
+      write_conf
     }
+  }
+}
+
+class SimpleSelector(max : Int) {
+  private var counter = 0
+
+  def get : Int = {
+    counter = (counter + 1) % max
+    counter
   }
 }
 
@@ -158,6 +266,7 @@ object MmsDaemon {
  * 算法的原理是使用一个固定的步长去遍历整个权重的区间，如果到头就折返。
  * 权重越高的元素，成为步长落脚处的机会也越多。
  */
+/*
 class StepSelector(weights : List[Int]) {
   private val accumulated_weights = weights.scanLeft(0)(_ + _)
   private val milestones = accumulated_weights.init
@@ -188,33 +297,49 @@ class StepSelector(weights : List[Int]) {
     selected
   }
 }
+*/
 
+class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, the_enabled : Boolean) {
+  val ip_addr = the_ip_addr
+  val tcp_port = the_tcp_port
+  val capacity_list = List(10,50,100,200,480,720)
 
-class ModemPort(ip_addr : String, tcp_port : Int) {
-  val interval_of_send = 60*1000L
+  def interval_of_send = (1440 / my_capacity) * 60 * 1000L
 
-  private var my_weight = 100
   private var my_last_sent_time : Long = 0L
   private var my_session : MmsSession = null
+//  private var my_session : DummySession = null
   private var history = List[Boolean]()
+  private var enabled = the_enabled
+  private var my_capacity = 
+    capacity_list.reverse.find(x => x <= the_capacity) match {
+      case Some(x) => x
+      case None => 50
+    }
 
-  def weight = my_weight
-  def set_weight(value : Int) { my_weight = value }
+//  def weight = my_weight
+//  def set_weight(value : Int) { my_weight = value }
 
   private def push_to_history(value : Boolean) : Unit = {
     history = value :: history
-    if(history.length > 100)
-      history = history.take(100)
+    if(history.length > 10)
+      history = history.take(10)
   }
 
-  def success_rate : Double = 
-    if(history.isEmpty)
-      0.0
-    else
-      history.count(x => x).toDouble / history.length
+  private def cooled_down : Boolean = 
+    (System.currentTimeMillis - my_last_sent_time > interval_of_send)
+
+  def success_rate_string : String = 
+    if(history.isEmpty) "No Record"
+    else 
+      (history.count(x => x).toString + "/" +
+       history.length.toString + " == " +
+       (history.count(x => x) * 100 / history.length).toString + "%") 
 
   def is_ready : Boolean = 
-    if(System.currentTimeMillis - my_last_sent_time < interval_of_send)
+    if(!enabled)
+      false
+    else if(!cooled_down)
       false
     else if(my_session == null)
       true
@@ -225,18 +350,104 @@ class ModemPort(ip_addr : String, tcp_port : Int) {
     }
     else false
 
+  def change_capacity : Unit = {
+    val place = capacity_list.indexOf(my_capacity)
+    val new_place = 
+      if(place < 0) 0
+      else if(place + 1 >= capacity_list.length) 0
+      else place + 1
+    my_capacity = capacity_list(new_place)
+  }
+
+  def capacity = my_capacity
+
+  def get_status_string : String = {
+    def cooling_down_string : String = {
+      val time = (interval_of_send - (System.currentTimeMillis - my_last_sent_time))
+        ("Cool Down(" +
+         (time / 60 / 1000).toString + ":" +
+         ((time / 1000) % 60).toString + ")"
+       )
+    }
+
+    def busy_string : String = {
+      val time = (System.currentTimeMillis - my_last_sent_time)
+        ("Busy(" +
+         (time / 60 / 1000).toString + ":" +
+         ((time / 1000) % 60).toString + ")"
+       )
+    }
+
+    if(!enabled)
+      "Disabled"
+    else if(my_session != null) 
+      if(my_session.getState == Thread.State.TERMINATED) {
+        push_to_history(my_session.is_successful)
+        my_session = null
+        if(cooled_down) "Ready" else cooling_down_string
+      } else busy_string
+    else
+      if(cooled_down) "Ready" else cooling_down_string
+  }
   
-  def kill_session : Unit = { 
+  // 将 busy的端口强行disable掉，将会放弃当前发送的彩信，但是，
+  // disable无论怎样切换，都不会改变cool down的时间限制。
+  def toggle_enabled : Unit = {
     if(my_session != null) {
+      my_session.interrupt
+      my_session = null
+      push_to_history(false)
+    }
+    enabled = !enabled
+  }
+
+  def is_enabled : Boolean = enabled
+
+  def kill_session : Unit = 
+    if((my_session != null) && cooled_down && enabled) {
       my_session.interrupt 
       my_session = null 
       push_to_history(false)
     }
-  }
 
   def send_mms(msg_data : List[Byte]) : Unit = {
+    print("sending mms on " + this.toString)
     my_session = new MmsSession(ip_addr, tcp_port, msg_data)
+//    my_session = new DummySession(ip_addr, tcp_port, msg_data)
     my_session.start
     my_last_sent_time = System.currentTimeMillis
   }
+
+  override def toString : String =
+    ("port = " + 
+     ip_addr + "  " + 
+     tcp_port + "     " + 
+     my_capacity + "     " + 
+     enabled)
+}
+
+class DummySession(ip_addr : String, 
+                   tcp_port : Int, 
+                   msg_data : List[Byte]) extends Thread {
+  import scala.util.Random
+
+  val my_name = "DummySession [" + ip_addr + ":" + tcp_port + "]"
+
+  override def run : Unit = {
+    println(my_name + " started and pretending to send.")
+    try {
+      if(Random.nextGaussian.abs >= 1.5) {
+        println(my_name + " will not respond soon.")
+        Thread.sleep(10*60*1000) // dead loop connection
+      }
+      else
+        Thread.sleep(Random.nextInt(50*1000) + 50*1000) // 50 to 100 sec
+      println(my_name + " peacefully exiting.")
+    } catch {
+      case e : InterruptedException =>
+        println(my_name + " is interrupted.")
+    }
+  }
+
+  def is_successful : Boolean = (Random.nextInt(10) != 0)
 }

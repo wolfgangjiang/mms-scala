@@ -52,6 +52,12 @@
         </dependency>
 
         <dependency>
+          <groupId>com.google.code.gson</groupId>
+          <artifactId>gson</artifactId>
+          <version>1.4</version>
+        </dependency>
+
+        <dependency>
             <groupId>net.lag</groupId>
             <artifactId>configgy</artifactId>
             <version>2.0.0</version>
@@ -73,6 +79,18 @@
             <groupId>commons-net</groupId>
             <artifactId>commons-net</artifactId>
             <version>2.2</version>
+        </dependency>
+
+        <dependency>
+          <groupId>commons-httpclient</groupId>
+          <artifactId>commons-httpclient</artifactId>
+          <version>3.1</version>
+        </dependency>
+
+        <dependency>
+          <groupId>com.googlecode.xmemcached</groupId>
+          <artifactId>xmemcached</artifactId>
+          <version>1.2.5</version>
         </dependency>
 
         <dependency>
@@ -115,6 +133,7 @@
                         <launcher>
                             <id>default</id>
                             <mainClass>com.edoctor.mms.App</mainClass>
+                            <!-- jvmArgs are optional -->
                             <jvmArgs>
                                 <jvmArg>-Xmx128m</jvmArg>
                             </jvmArgs>
