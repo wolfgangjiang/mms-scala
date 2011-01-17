@@ -22,6 +22,11 @@ object App {
   }
 } */
 
+// 若一个port连续不能成功发送，可以考虑降低它的capacity，或者将它
+// disable半小时左右，让modem休息一下，也许接下去就行了。如果还是不行，
+// 则可能是余额不足或被封号。
+
+
 object KestrelHandler {
   val queue_addr = read_kestrel_config("mms.conf")
   private var i_am_fine = true
@@ -29,13 +34,14 @@ object KestrelHandler {
   def is_fine = i_am_fine
 
   private def read_kestrel_config(filename : String) : String = {
+    Log.info("KestrelHandler", "Read kestrel config from " + filename)
     try {
       val source = io.Source.fromFile(filename)
       source.getLines.find(line => line.startsWith("kestrel =")).get.drop(9).trim.split("\\s+").toList.mkString(":")
     } catch {
       case e : Exception => {
-        e.printStackTrace
-        println("Error reading from config file: " + filename)
+        Log.error("KestrelHandler", e)
+        Log.error("KestrelHandler", "Error reading from config file: " + filename)
         exit(-1)
       }
     }    
@@ -75,6 +81,21 @@ object KestrelHandler {
     }
   }
 
+  def put(thing : String) : Unit = {
+    try {
+      client.set("mms", 0, thing)
+      i_am_fine = true
+    } catch {
+      case e : Exception => {
+        i_am_fine = false 
+        e.printStackTrace
+        client = initialize_client
+        return null
+      }
+    }
+
+  }
+
   def shutdown : Unit = client.shutdown
 }
 
@@ -108,8 +129,8 @@ List(
         x => x.get)
     } catch {
       case e : Exception => {
-        e.printStackTrace
-        println("Error reading from config file: " + filename)
+        Log.error("MMS daemon", e)
+        Log.error("MMS daemon", "Error reading from config file: " + filename)
         exit(-1)
       }
     }
@@ -122,19 +143,17 @@ List(
     val subject = fields(1)
     val text = fields(2)
     val pic_url = fields(3)
-    val mid_url = if(fields.length > 4) fields(4) else "none"
+    val mid_url : String = if(fields.length > 4) fields(4) else ""
 
+
+    Log.debug("make_mms_message", "Got from kestrel queue.")
+    Log.debug("make_mms_message", "target is: " + target)
+    Log.debug("make_mms_message", "text is: " + text)
+    Log.debug("make_mms_message", "pic_url is: " + pic_url)
+    Log.debug("make_mms_message", "mid_url is: " + mid_url)
     
-    println("target is: " + target)
-    println("text is: " + text)
-    println("pic_url is: " + pic_url)
-    println("mid_url is: " + mid_url)
-    
-
-    println("== Got from kestrel queue, text is: " + text)
-
     val pic_data = download(pic_url)
-    val mid_data = if(mid_url == "none") Nil else download(mid_url)
+    val mid_data = if(mid_url == "") Nil else download(mid_url)
 
     val msg = new MMMessage()
     msg.setMessageType(MMConstants.MESSAGE_TYPE_M_SEND_REQ)
@@ -143,13 +162,14 @@ List(
     msg.setTo("+86" + target + "/TYPE=PLMN")
     msg.setSubject(" " + subject)
     msg.setVersion(1)
-    msg.setContentType("application/vnd.wap.multipart.related")
+    msg.setContentType("application/vnd.wap.multipart.mixed")
 
     if(pic_data.isEmpty)
       throw new CannotDownloadException(pic_url)
     
     msg.addPart("image/gif", pic_data.toArray, false, null, null)
 
+/*
     val test_s = new java.io.DataOutputStream(
       new java.io.FileOutputStream(new java.io.File("a.gif")))
     test_s.write(pic_data.toArray, 0, pic_data.length)
@@ -159,7 +179,7 @@ List(
       new java.io.FileOutputStream(new java.io.File("a.mid")))
     test_s2.write(mid_data.toArray, 0, mid_data.length)
     test_s2.close
-
+*/
     msg.addPart("text/plain; charset=\"utf-8\"", text.getBytes, false, null, null)
 
     if(!mid_data.isEmpty)
@@ -184,6 +204,7 @@ List(
     }
   }
 
+  /*
   private var selector = 
     new SimpleSelector(ports.length)
 
@@ -196,6 +217,7 @@ List(
       send(msg)  // 尾递归，取用下一个port
     }
   }
+  */
 
   private def write_conf : Unit = {
     import java.io._
@@ -218,27 +240,62 @@ List(
       writer.close
     } catch {
       case e : IOException => {
-        e.printStackTrace
-        println("Error when auto writing to conf file" + filename)
+        Log.error("write_conf", e)
+        Log.error("write_conf", "Error when auto writing to conf file" + filename)
       }
     }
   }
 
+  /**
+   * 在这里可以对ports进行多步操作，因为除了本对象之外，不会有其它
+   * 线程使得一个ready的port变成“不ready”的。
+   */
+  def get_port : Option[ModemPort] = {
+    ports.foreach(_.kill_dangling_session)
+    val ready_ports = ports.filter(_.is_ready)
+    if(ready_ports.isEmpty)
+      None
+    else
+      Some(ready_ports(util.Random.nextInt(ready_ports.length)))
+  }
+
+  def get_request : Option[String] = {
+    val request = KestrelHandler.get
+    if(request == null)
+      None
+    else
+      Some(request)
+  }
+
   def main_loop : Unit = {
-    ports.foreach(p => println(p))
+    ports.foreach{p =>
+      Log.info("MMS daemon", p.toString) }
     var going = true
+    Log.info("MMS daemon", "Main loop started")
     while(going) {
-      val request = KestrelHandler.get
-      if(request != null) {
-        try {
-          val msg : List[Byte] = make_mms_message(request)
-          send(msg)
-        } catch {
-          case e : CannotDownloadException =>
-            println("Cannot download pic " + 
+      try {
+        // port无论去获取多少次都没有关系，它总是在那里等着。但是
+        // request就不能贸然去获取，因为这种读取是破坏性的，所以一定要
+        // 在有port可用的情况下才去获取request。若两者都有，就可以发送
+        // 了。
+        val port = get_port
+        if(port != None) {
+          val request = get_request
+          if(request != None) {
+            val msg : List[Byte] = make_mms_message(request.get)
+            port.get.send_mms(request.get, msg)
+          }
+        }
+      } catch {
+        case e : CannotDownloadException => {
+          Log.error("MMS daemon", e)
+          Log.error("MMS daemon",
+                    "Cannot download pic " + 
                     e.getMessage + ", message was not sent")
-          case e : Exception =>
-            e.printStackTrace ; println("Error in mms request.")
+        }
+        case e : Exception => {
+          Log.error("MMS daemon", e)
+          Log.error("MMS daemon", "Above is an overall exception that is not caught in subroutines.")
         }
       }
       Thread.sleep(2000)
@@ -247,6 +304,7 @@ List(
   }
 }
 
+/*
 class SimpleSelector(max : Int) {
   private var counter = 0
 
@@ -255,7 +313,7 @@ class SimpleSelector(max : Int) {
     counter
   }
 }
-
+*/
 /**
  * 一个StepSelector在初始化中接受一个权重的表，每次调用get方法时，会得
  * 到一个从0到权重表长减一之间的值，表示选中了表中的某个元素的index。元
@@ -299,6 +357,10 @@ class StepSelector(weights : List[Int]) {
 }
 */
 
+// 一个ModemPort对象的生存期贯穿从彩信模块开始运行到结束运行，与之相
+// 对，ModemSession对象则是为每条彩信建立一个。当ModemPort对象刚刚完成
+// 初始化的时候，它的capacity和enabled参数来自于构造函数，而my_session
+// 成员变量为null。
 class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, the_enabled : Boolean) {
   val ip_addr = the_ip_addr
   val tcp_port = the_tcp_port
@@ -317,6 +379,8 @@ class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, th
       case None => 50
     }
 
+  private var last_request : String = null
+
 //  def weight = my_weight
 //  def set_weight(value : Int) { my_weight = value }
 
@@ -324,6 +388,8 @@ class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, th
     history = value :: history
     if(history.length > 10)
       history = history.take(10)
+    if(!value)
+      KestrelHandler.put(last_request)
   }
 
   private def cooled_down : Boolean = 
@@ -337,6 +403,9 @@ class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, th
        (history.count(x => x) * 100 / history.length).toString + "%") 
 
   def is_ready : Boolean = 
+    (get_status_string == "Ready")
+
+/*
     if(!enabled)
       false
     else if(!cooled_down)
@@ -349,6 +418,7 @@ class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, th
       true
     }
     else false
+*/
 
   def change_capacity : Unit = {
     val place = capacity_list.indexOf(my_capacity)
@@ -403,19 +473,23 @@ class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, th
 
   def is_enabled : Boolean = enabled
 
-  def kill_session : Unit = 
+  def kill_dangling_session : Unit = 
     if((my_session != null) && cooled_down && enabled) {
       my_session.interrupt 
       my_session = null 
       push_to_history(false)
     }
 
-  def send_mms(msg_data : List[Byte]) : Unit = {
-    print("sending mms on " + this.toString)
-    my_session = new MmsSession(ip_addr, tcp_port, msg_data)
+  def send_mms(request : String, msg_data : List[Byte]) : Unit = {
+    if(is_ready) {
+      Log.info(this.toString, "sending mms")
+      my_session = new MmsSession(ip_addr, tcp_port, msg_data)
 //    my_session = new DummySession(ip_addr, tcp_port, msg_data)
-    my_session.start
-    my_last_sent_time = System.currentTimeMillis
+      my_session.start
+      my_last_sent_time = System.currentTimeMillis
+      last_request = request
+    } else 
+      Log.error(this.toString, "Bug, trying to send msg via a port that is not ready.")
   }
 
   override def toString : String =

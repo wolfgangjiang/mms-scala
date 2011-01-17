@@ -136,6 +136,7 @@ object PacketKindDefinitions extends Enumeration{
   val P_ipcp_config_ack = Value
   val P_ipcp_config_nak = Value
   val P_wtp_ack = Value
+  val P_wtp_nak = Value
   val P_wsp_connect_reply = Value
   val P_wsp_reply_success = Value
   val P_wsp_reply_fail = Value
@@ -351,6 +352,10 @@ object SessionHelpers {
             case 0x03 =>
               new Packet(P_wtp_ack, 
                          Map("tid" -> tid))
+            case 0x07 =>
+              new Packet(P_wtp_nak,
+                         Map("tid" -> tid, 
+                             "psn" -> wtp_pdu.drop(4).take(wtp_pdu(3))))
             case _ =>
               unknown_report
           }
@@ -371,8 +376,8 @@ object SessionHelpers {
         if(octet != 0x7e)
           data = octet :: data
         else if(!data.isEmpty) {
-          print("received: ")
-          println_hex(decode_escape(data.reverse))
+          Log.bytes(s_info.name, 
+                    "received: " + list_to_hex(decode_escape(data.reverse)))
           return parse_packet(decode_escape(data.reverse))
         }
         // else do nothing with an empty packet and wait for next
@@ -383,8 +388,9 @@ object SessionHelpers {
     new Packet(P_timeout, Map.empty)
   }
 
-  def warn_unhandled_packet(packet : Packet) : Unit = {
-    println("warning of unhandled packet: " + packet)
+  def warn_unhandled_packet(s_info : SessionInfo, packet : Packet) : Unit = {
+    Log.error(s_info.name, 
+              "warning of unhandled packet: " + packet)
   }
 
   def ppp_encapsulate(data : List[Byte]) = 
@@ -393,11 +399,11 @@ object SessionHelpers {
        attach_fcs16(0xFF.toByte :: 0x03.toByte :: data))
      :+ 0x7e.toByte)
 
-  def send_packet(s_info : SessionInfo, packet : List[Byte]) = {
-    s_info.out_s.write(packet.toArray)
+  def send_packet(s_info : SessionInfo, data : List[Byte]) = {
+    s_info.out_s.write(data.toArray)
     s_info.out_s.flush
-    print("sent: ")
-    println_hex(decode_escape(packet))
+    Log.bytes(s_info.name, 
+              "sent: " + list_to_hex(decode_escape(data)))
   }
 
   def dial(s_info : SessionInfo) : Boolean = {
@@ -500,8 +506,8 @@ class Retransmitter(packet : List[Byte], s_info : SessionInfo) {
 
   def visit : Unit = {
     if(System.currentTimeMillis - last_sent_time > request_timeout_interval) {
-      print("retranmit:")
-      println_hex(decode_escape(packet))
+      Log.bytes(s_info.name, 
+                "retransmit: " + list_to_hex(decode_escape(packet)))
       s_info.out_s.write(packet.toArray)
       s_info.out_s.flush
       last_sent_time = System.currentTimeMillis
@@ -514,7 +520,8 @@ class Retransmitter(packet : List[Byte], s_info : SessionInfo) {
 
 case class Packet(kind : PacketKind, parameters : Map[String, Any])
 
-class SessionInfo(my_in_s : InputStream, my_out_s : OutputStream) {
+class SessionInfo(my_name : String, my_in_s : InputStream, my_out_s : OutputStream) {
+  val name = my_name
   val in_s = my_in_s
   val out_s = my_out_s
   var ip_addr = ""
@@ -581,9 +588,9 @@ object SessionHandlers {
           if(param("id") == our_config_req_id)
             config_ack_rcvd = true
           else
-            warn_unhandled_packet(packet)        
+            warn_unhandled_packet(s_info, packet)        
         case _ =>
-          warn_unhandled_packet(packet)
+          warn_unhandled_packet(s_info, packet)
       }
       retransmitter.visit // maybe perform retransmitting 
     }
@@ -610,9 +617,9 @@ object SessionHandlers {
           if(param("id") == our_terminate_req_id)
             terminate_ack_rcvd = true
           else
-            warn_unhandled_packet(packet)
+            warn_unhandled_packet(s_info, packet)
         case _ =>
-          warn_unhandled_packet(packet)
+          warn_unhandled_packet(s_info, packet)
       }
       retransmitter.visit
     }
@@ -640,9 +647,9 @@ object SessionHandlers {
           if(param("id") == our_auth_req_id)
             auth_ack_rcvd = true
           else
-            warn_unhandled_packet(packet)
+            warn_unhandled_packet(s_info, packet)
         case _ =>
-          warn_unhandled_packet(packet)
+          warn_unhandled_packet(s_info, packet)
       }
       retransmitter.visit
     }
@@ -695,14 +702,14 @@ object SessionHandlers {
             retransmitter = new Retransmitter(our_second_config_req, s_info)
             // retransmitter for first config request is discarded here
             // and will never be visited in future
-          } else warn_unhandled_packet(packet)            
+          } else warn_unhandled_packet(s_info, packet)            
         case Packet(P_ipcp_config_ack, param) => 
           if(param("id") == our_second_config_req_id)
             assigned_ip_addr = param("ip_addr").asInstanceOf[List[Byte]]
           else
-            warn_unhandled_packet(packet)
+            warn_unhandled_packet(s_info, packet)
         case _ =>
-          warn_unhandled_packet(packet)
+          warn_unhandled_packet(s_info, packet)
       } // match
       retransmitter.visit // maybe perform retransmitting
     } // while
@@ -754,9 +761,9 @@ object SessionHandlers {
             s_info.session_id = param("session_id").asInstanceOf[List[Byte]]
             connect_reply_rcvd = true
           } 
-          else warn_unhandled_packet(packet)            
+          else warn_unhandled_packet(s_info, packet)            
         case _ =>
-          warn_unhandled_packet(packet)
+          warn_unhandled_packet(s_info, packet)
       }
       retransmitter.visit // maybe perform retransmitting
     }
@@ -845,6 +852,12 @@ object SessionHandlers {
     wtp_fragments.foreach(send_one_fragment)
     var timeout_counter = 30
     
+    def resend(fragment : List[Byte]) : Unit = {
+      val new_fragment = (fragment.head & 0x01).toByte :: fragment.tail
+      // set RID = 1, which means this pdu is being retransmitted
+      send_one_fragment(new_fragment)
+    }
+
     while(timeout_counter > 0) {
       val packet = read_packet(s_info)
       packet match {
@@ -852,23 +865,30 @@ object SessionHandlers {
           if(param("tid") == tid)
             {} // do nothing
           else
-            warn_unhandled_packet(packet)
+            warn_unhandled_packet(s_info, packet)
+        case Packet(P_wtp_nak, param) =>
+          if(param("tid") == tid) {
+            param("psn").asInstanceOf[List[Byte]].foreach { 
+              psn => resend(wtp_fragments(psn)) }
+          } 
+          else 
+            warn_unhandled_packet(s_info, packet)
         case Packet(P_wsp_reply_success, param) =>
           if(param("tid") == tid)
             return // 成功
           else
-            warn_unhandled_packet(packet)
+            warn_unhandled_packet(s_info, packet)
         case Packet(P_wsp_reply_fail, param) =>
           throw new SessionException("Bad reply from mmsc")
         case Packet(P_timeout, param) => {
-          println("waiting ...")
+          // Log.info(s_info.name, "waiting ...")
           timeout_counter -= 1
         }
         case _ =>
-          warn_unhandled_packet(packet)
+          warn_unhandled_packet(s_info, packet)
       }
     }
-    throw new SessionException
+    throw new SessionException("Waited too long after sending all mms data and still cannot get wsp acknowledge.")
   }
 }
 
@@ -880,37 +900,45 @@ class MmsSession(modem_ip : String,
   def is_successful = this.success
 
   override def run : Unit = {
-    val tc = new TelnetClient
     try {
-      tc.connect(modem_ip, modem_port)
-      val s_info = new SessionInfo(tc.getInputStream, tc.getOutputStream)
-      if(dial(s_info)) {
-        try {
-          SessionHandlers.lcp_connect(s_info)
-          SessionHandlers.pap_authenticate(s_info)
-          SessionHandlers.ipcp_configure(s_info)
-          println("My Ip Address: " + s_info.ip_addr)
+      val tc = new TelnetClient
+      try {
+        tc.connect(modem_ip, modem_port)
+        val s_info = new SessionInfo(
+          modem_ip + ":" + modem_port.toString, 
+          tc.getInputStream, tc.getOutputStream)
+        if(dial(s_info)) {
           try {
-            SessionHandlers.wsp_connect(s_info)
-            SessionHandlers.send_mms(s_info, msg_data)
-            success = true
-            println("**********************")
-            println("***    Success!    ***")
-            println("**********************")
+            SessionHandlers.lcp_connect(s_info)
+            SessionHandlers.pap_authenticate(s_info)
+            SessionHandlers.ipcp_configure(s_info)
+            Log.info(s_info.name, "My Ip Address: " + s_info.ip_addr)
+            try {
+              SessionHandlers.wsp_connect(s_info)
+              SessionHandlers.send_mms(s_info, msg_data)
+              success = true
+              Log.info(s_info.name, " ******* Success! ******* ")
+            } finally {
+              SessionHandlers.wsp_disconnect(s_info)
+            }
           } finally {
-            SessionHandlers.wsp_disconnect(s_info)
+            SessionHandlers.lcp_terminate(s_info)
           }
-        } finally {
-          SessionHandlers.lcp_terminate(s_info)
-        }
-      } else throw new SessionException("No carrier")
+        } else throw new SessionException("No carrier")
+      } catch {
+        case e : SessionException =>
+          Log.error(modem_ip + ":" + modem_port.toString, e)
+        case e : java.net.ConnectException =>
+          Log.error(modem_ip + ":" + modem_port.toString, e)
+      } finally {
+        tc.disconnect
+      }    
     } catch {
-      case e : SessionException =>
-        println("session exception: " + e)
-      case e : java.net.ConnectException =>
-        println("connect exception: " + e)
-    } finally {
-      tc.disconnect
-    }    
+      case e : InterruptedException => 
+        Log.error(modem_ip + ":" + modem_port.toString, 
+                  "Interrupted")
+      case e : Exception =>
+        Log.error(modem_ip + ":" + modem_port.toString, e)
+    }
   }
 }
