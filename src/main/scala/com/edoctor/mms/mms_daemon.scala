@@ -137,7 +137,6 @@ object KestrelHandler {
   }
 }
 
-class CannotDownloadException(msg : String) extends RuntimeException
 class MalformedMessageException extends RuntimeException
 
 object MmsDaemon {
@@ -154,8 +153,9 @@ List(
     ("192.168.10.230", 966, 200, true))
  */
 
-  val ports = 
-    port_config.map( p => new ModemPort(p._1, p._2, p._3, p._4) ) 
+  val ports : List[Port] = 
+    (port_config.map( p => new ModemPort(p._1, p._2, p._3, p._4) ) :+ 
+     new SPPort("Cosms SP        ", 1440, false, CosmsSPInfo.send_mms_method))
 
   private def read_port_config(filename : String) : List[(String, Int, Int, Boolean)] = {
     def find_port(line : String) : Option[(String, Int, Int, Boolean)] =
@@ -239,11 +239,11 @@ test_s2.close
 
       result
     } catch {
-      case e : Exception => 
+      case e : Exception => {
         Log.error("make_mms_message", e)
         throw new MalformedMessageException
+      }
     }
-
   }
 
   private def download(url : String) : List[Byte] = {
@@ -283,14 +283,14 @@ test_s2.close
 
     val info_string = kestrel_info +
       ("# Following is modem port configuration.\n" +
-       "# Each line must start with string \"port=\",\n" +
+       "# Each line must start with string \"port =\",\n" +
        "# four data fields are MODEM_IP, MODEM_PORT, DAY_CAPACITY and IS_ENABLED,\n" +
        "# and they must be separated with blank, not comma.\n" +
        "# When system is running, this file will be automatically saved every 2 seconds.\n")
 
     try {
       val writer = new FileWriter(filename)
-      writer.write(info_string + ports.map(_.toString).mkString("\n"))
+      writer.write(info_string + ports.map(_.to_conf_string).mkString("\n"))
       writer.close
     } catch {
       case e : IOException => {
@@ -304,7 +304,7 @@ test_s2.close
    * 在这里可以对ports进行多步操作，因为除了本对象之外，不会有其它
    * 线程使得一个ready的port变成“不ready”的。
    */
-  def get_port : Option[ModemPort] = {
+  def get_port : Option[Port] = {
     ports.foreach(_.kill_dangling_session)
     val ready_ports = ports.filter(_.is_ready)
     if(ready_ports.isEmpty)
@@ -342,7 +342,7 @@ test_s2.close
 
   def main_loop : Unit = {
     ports.foreach{p =>
-      Log.info("MMS daemon", p.toString) }
+      Log.info("MMS daemon", p.to_conf_string) }
     var going = true
     Log.info("MMS daemon", "Main loop started")
     while(going) {
@@ -378,11 +378,8 @@ test_s2.close
           // 无论如何，定时在未来的请求总也不会提前被发送。
         }
       } catch {
-        case e : CannotDownloadException => {
+        case e : MalformedMessageException => {
           Log.error("MMS daemon", e)
-          Log.error("MMS daemon",
-                    "Cannot download pic " + 
-                    e.getMessage + ", message was not sent")
         }
         case e : Exception => {
           Log.error("MMS daemon", e)
@@ -393,12 +390,25 @@ test_s2.close
   }
 }
 
+trait Port {
+  def success_rate_string : String
+  def is_ready : Boolean
+  def change_capacity : Unit
+  def capacity : Int
+  def interval_of_send : Long
+  def get_status_string : String
+  def toggle_enabled : Unit
+  def is_enabled : Boolean
+  def kill_dangling_session : Unit
+  def send_mms(request : String, msg_data : List[Byte]) : Unit
+  def to_conf_string : String
+}
 
 // 一个ModemPort对象的生存期贯穿从彩信模块开始运行到结束运行，与之相
 // 对，ModemSession对象则是为每条彩信建立一个。当ModemPort对象刚刚完成
 // 初始化的时候，它的capacity和enabled参数来自于构造函数，而my_session
 // 成员变量为null。
-class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, the_enabled : Boolean) {
+class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, the_enabled : Boolean) extends Port {
   val ip_addr = the_ip_addr
   val tcp_port = the_tcp_port
   val capacity_list = List(10,50,100,200,480,720)
@@ -514,7 +524,10 @@ class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, th
       Log.error(this.toString, "Bug, trying to send msg via a port that is not ready.")
   }
 
-  override def toString : String =
+  override def toString : String = 
+    (ip_addr + " " + tcp_port)    // 为了打印整齐，长度必须为19
+
+  def to_conf_string : String =
     ("port = " + 
      ip_addr + "  " + 
      tcp_port + "     " + 
@@ -522,6 +535,109 @@ class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, th
      enabled)
 }
 
+class SPPort(the_name : String, the_capacity : Int, the_enabled: Boolean, send_mms_method : (String, List[Byte]) => Boolean) extends Port {
+  val my_name = the_name
+  val capacity_list = List(10,50,100,200,480,720,1440)
+
+  def interval_of_send = (1440 / my_capacity) * 60 * 1000L
+
+  private var my_last_sent_time : Long = 0L
+  private var history = List[Boolean]()
+  private var enabled = the_enabled
+  private var my_capacity = 
+    capacity_list.reverse.find(x => x <= the_capacity) match {
+      case Some(x) => x
+      case None => 50
+    }
+
+  private var last_request : String = null
+
+//  def weight = my_weight
+//  def set_weight(value : Int) { my_weight = value }
+
+  private def push_to_history(value : Boolean) : Unit = {
+    history = value :: history
+    if(history.length > 10)
+      history = history.take(10)
+    if(!value)
+      KestrelHandler.put(last_request)
+  }
+
+  private def cooled_down : Boolean = 
+    (System.currentTimeMillis - my_last_sent_time > interval_of_send)
+
+  def success_rate_string : String = 
+    if(history.isEmpty) "No Record"
+    else 
+      (history.count(x => x).toString + "/" +
+       history.length.toString + " == " +
+       (history.count(x => x) * 100 / history.length).toString + "%") 
+
+  def is_ready : Boolean = 
+    (get_status_string == "Ready")
+
+  def change_capacity : Unit = {
+    val place = capacity_list.indexOf(my_capacity)
+    val new_place = 
+      if(place < 0) 0
+      else if(place + 1 >= capacity_list.length) 0
+      else place + 1
+    my_capacity = capacity_list(new_place)
+  }
+
+  def capacity = my_capacity
+
+  def get_status_string : String = {
+    def cooling_down_string : String = {
+      val time = (interval_of_send - (System.currentTimeMillis - my_last_sent_time))
+        ("Cool Down(" +
+         (time / 60 / 1000).toString + ":" +
+         ((time / 1000) % 60).toString + ")"
+       )
+    }
+
+    def busy_string : String = {
+      val time = (System.currentTimeMillis - my_last_sent_time)
+        ("Busy(" +
+         (time / 60 / 1000).toString + ":" +
+         ((time / 1000) % 60).toString + ")"
+       )
+    }
+
+    if(!enabled)
+      "Disabled"
+    else
+      if(cooled_down) "Ready" else cooling_down_string
+  }
+  
+  // 将 busy的端口强行disable掉，将会放弃当前发送的彩信，但是，
+  // disable无论怎样切换，都不会改变cool down的时间限制。
+  def toggle_enabled : Unit = {
+    enabled = !enabled
+  }
+
+  def is_enabled : Boolean = enabled
+
+  def kill_dangling_session : Unit = { } // do nothing
+
+  def send_mms(request : String, msg_data : List[Byte]) : Unit = {
+    Log.info(this.toString, "sending mms")
+    last_request = request
+    my_last_sent_time = System.currentTimeMillis
+    push_to_history(send_mms_method(request,msg_data))
+    Log.info(this.toString, "finished sending")
+  }
+
+  override def toString : String = my_name
+
+  def to_conf_string : String =
+    ("SP   = " + 
+     my_name + "     " + 
+     my_capacity + "     " + 
+     enabled)
+}
+
+// 测试用
 class DummySession(ip_addr : String, 
                    tcp_port : Int, 
                    msg_data : List[Byte]) extends Thread {

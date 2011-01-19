@@ -165,7 +165,7 @@ class TelnetShell extends Shell {
                       }))
           MmsDaemon.ports.map{ 
             port =>
-              "  " + port.ip_addr + " " + port.tcp_port + "  " + (
+              "  " + port.toString + "  " + (
                 mode match {
                   case M_status => port.get_status_string
                   case M_capacity => 
