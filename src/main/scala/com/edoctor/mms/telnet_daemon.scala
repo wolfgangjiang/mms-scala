@@ -23,6 +23,7 @@ object App {
       TelnetD.createTelnetD(load_properties("telnetd.properties"))
 
     telnet_daemon.start    
+    (new RearrangeTimedMessageRemindActor).start
 
     try {
       MmsDaemon.main_loop

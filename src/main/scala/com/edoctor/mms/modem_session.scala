@@ -926,9 +926,9 @@ class MmsSession(modem_ip : String,
           }
         } else throw new SessionException("No carrier")
       } catch {
-        case e : SessionException =>
+        case e : SessionException => 
           Log.error(modem_ip + ":" + modem_port.toString, e)
-        case e : java.net.ConnectException =>
+        case e : java.net.ConnectException => 
           Log.error(modem_ip + ":" + modem_port.toString, e)
       } finally {
         tc.disconnect

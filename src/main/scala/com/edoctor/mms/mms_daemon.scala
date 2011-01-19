@@ -9,19 +9,6 @@ import org.apache.commons.httpclient.methods.GetMethod
 
 import net.tambur.mms.{ MMMessage, MMConstants }
 
-/*
-object App {
-  def main(args : Array[String]) : Unit = {
-    println("Hello world.")
-    try {
-      MmsDaemon.main_loop
-    } finally {
-      KestrelHandler.shutdown
-    }
-    println("Goodbye world.")
-  }
-} */
-
 // 若一个port连续不能成功发送，可以考虑降低它的capacity，或者将它
 // disable半小时左右，让modem休息一下，也许接下去就行了。如果还是不行，
 // 则可能是余额不足或被封号。
@@ -61,7 +48,7 @@ object KestrelHandler {
     } catch {
       case e : Exception => {
         i_am_fine = false
-        e.printStackTrace
+        Log.error("KestrelHandler", e)
         return null
       }
     }
@@ -74,7 +61,7 @@ object KestrelHandler {
     } catch {
       case e : Exception => {
         i_am_fine = false 
-        e.printStackTrace
+        Log.error("KestrelHandler", e)
         client = initialize_client
         return null
       }
@@ -88,22 +75,79 @@ object KestrelHandler {
     } catch {
       case e : Exception => {
         i_am_fine = false 
-        e.printStackTrace
+        Log.error("KestrelHandler", e)
         client = initialize_client
         return null
       }
     }
-
   }
 
   def shutdown : Unit = client.shutdown
+
+  def rearrange_timed_messages : Unit = {
+    // today_string的格式类似于当天的"19970530"。
+    val today_string : String = 
+      (new java.text.SimpleDateFormat("yyyyMMdd")).format(
+        java.util.Calendar.getInstance.getTime) 
+    
+    Log.info("KestrelHandler", "Starting rearrange queue for specified-timed messages of today.")
+
+    try {
+      var going = true    
+      // 首先将当前队列分成两个队列，当天的和不是当天的。
+      while(going) {
+        val request : String = client.get("mms") 
+        if(request == null) {
+          going = false
+        } else {
+          val type_example = Array("a")
+          val fields : Array[String] = (new com.google.gson.Gson).fromJson(request, type_example.getClass)
+          if(!fields.isEmpty && fields(0) == today_string)
+            client.set("mmstoday", 0, request)
+          else
+            client.set("mmsother", 0, request)
+        }
+      }
+
+      // 然后将它们先后放回到原先的队列中。
+      going = true
+      while(going) {
+        val request : String = client.get("mmstoday")
+        if(request == null) going = false
+        else client.set("mms", 0, request)
+      }
+
+      going = true
+      while(going) {
+        val request : String = client.get("mmsother")
+        if(request == null) going = false
+        else client.set("mms", 0, request)
+      }
+        
+      i_am_fine = true
+      Log.info("KestrelHandler", "Finished rearranging queue for specified-timed messages of today, successfully.")
+    } catch {
+      case e : Exception => {
+        i_am_fine = false 
+        Log.error("KestrelHandler", e)
+        client = initialize_client
+        return null
+      }
+    }
+  }
 }
 
 class CannotDownloadException(msg : String) extends RuntimeException
+class MalformedMessageException extends RuntimeException
 
 object MmsDaemon {
   private val port_config : List[(String, Int, Int, Boolean)] = 
     read_port_config("mms.conf")
+  private var remind_rearrange : Boolean = false
+
+  // 本函数由一个自动定时的actor调用，每隔固定时间调用一次。
+  def remind_rearrange_timed_messages : Unit = { remind_rearrange = true }
+
 /*
 List(
     ("192.168.10.230", 964, 200, true),
@@ -137,60 +181,80 @@ List(
   }
 
   private def make_mms_message(request : String) : List[Byte] = {
-    val type_example = Array("a")
-    val fields : Array[String] = (new com.google.gson.Gson).fromJson(request, type_example.getClass)
-    val target = fields(0)
-    val subject = fields(1)
-    val text = fields(2)
-    val pic_url = fields(3)
-    val mid_url : String = if(fields.length > 4) fields(4) else ""
+    try {
+      val type_example = Array("a")
+      val fields : Array[String] = (new com.google.gson.Gson).fromJson(request, type_example.getClass)
+      val date = fields(0)
+      val target = fields(1)
+      val subject = fields(2)
+      val text = fields(3)
+      val pic_url = fields(4)
+      val mid_url : String = if(fields.length > 5) fields(5) else ""
 
+      Log.debug("make_mms_message", "Got from kestrel queue.")
+      Log.debug("make_mms_message", "target is: " + target)
+      Log.debug("make_mms_message", "text is: " + text)
+      Log.debug("make_mms_message", "pic_url is: " + pic_url)
+      Log.debug("make_mms_message", "mid_url is: " + mid_url)
 
-    Log.debug("make_mms_message", "Got from kestrel queue.")
-    Log.debug("make_mms_message", "target is: " + target)
-    Log.debug("make_mms_message", "text is: " + text)
-    Log.debug("make_mms_message", "pic_url is: " + pic_url)
-    Log.debug("make_mms_message", "mid_url is: " + mid_url)
-    
-    val pic_data = download(pic_url)
-    val mid_data = if(mid_url == "") Nil else download(mid_url)
+      Log.debug("make_mms_message", "Trying to download pic at " + pic_url)
+      val pic_data = download(pic_url)
+      Log.debug("make_mms_message", "Pic downloaded. Now trying to download mid at " + mid_url)
+      val mid_data = if(mid_url == "") Nil else download(mid_url)
+      Log.debug("make_mms_message", "Downloading finished, ")
 
-    val msg = new MMMessage()
-    msg.setMessageType(MMConstants.MESSAGE_TYPE_M_SEND_REQ)
-    msg.setTransactionId("0001")
-    msg.setFrom("+8615000279445/TYPE=PLMN")
-    msg.setTo("+86" + target + "/TYPE=PLMN")
-    msg.setSubject(" " + subject)
-    msg.setVersion(1)
-    msg.setContentType("application/vnd.wap.multipart.mixed")
+      val msg = new MMMessage()
+      msg.setMessageType(MMConstants.MESSAGE_TYPE_M_SEND_REQ)
+      msg.setTransactionId("0001")
+      msg.setFrom("+8615000279445/TYPE=PLMN")
+      msg.setTo("+86" + target + "/TYPE=PLMN")
+      msg.setSubject(" " + subject)
+      msg.setVersion(1)
+      msg.setContentType("application/vnd.wap.multipart.mixed")
 
-    if(pic_data.isEmpty)
-      throw new CannotDownloadException(pic_url)
-    
-    msg.addPart("image/gif", pic_data.toArray, false, null, null)
+      if(!pic_data.isEmpty)
+        msg.addPart("image/gif", pic_data.toArray, false, null, null)
 
-/*
-    val test_s = new java.io.DataOutputStream(
-      new java.io.FileOutputStream(new java.io.File("a.gif")))
-    test_s.write(pic_data.toArray, 0, pic_data.length)
-    test_s.close
+      /*
+       val test_s = new java.io.DataOutputStream(
+       new java.io.FileOutputStream(new java.io.File("a.gif")))
+       test_s.write(pic_data.toArray, 0, pic_data.length)
+       test_s.close
 
-    val test_s2 = new java.io.DataOutputStream(
-      new java.io.FileOutputStream(new java.io.File("a.mid")))
-    test_s2.write(mid_data.toArray, 0, mid_data.length)
-    test_s2.close
+val test_s2 = new java.io.DataOutputStream(
+new java.io.FileOutputStream(new java.io.File("a.mid")))
+test_s2.write(mid_data.toArray, 0, mid_data.length)
+test_s2.close
 */
-    msg.addPart("text/plain; charset=\"utf-8\"", text.getBytes, false, null, null)
+      msg.addPart("text/plain; charset=\"utf-8\"", text.getBytes, false, null, null)
 
-    if(!mid_data.isEmpty)
-      msg.addPart("audio/midi; autostart=true", mid_data.toArray, false, null, null)
+      if(!mid_data.isEmpty)
+        msg.addPart("audio/midi; autostart=true", mid_data.toArray, false, null, null)
 
-    msg.encode.toList
+      Log.debug("make_mms_message", "All parts downloaded and added to message, now start encoding it.")
+
+      val result : List[Byte] = msg.encode.toList
+
+      Log.debug("make_mms_message", "Finished encoding.")
+
+      result
+    } catch {
+      case e : Exception => 
+        Log.error("make_mms_message", e)
+        throw new MalformedMessageException
+    }
+
   }
 
   private def download(url : String) : List[Byte] = {
+    Log.debug("download", "downloading " + url)
+
     val httpclient = new HttpClient()
     val httpget = new GetMethod(url)
+
+    httpclient.getParams.setParameter("http.socket.timeout", 2000)
+    httpclient.getParams.setParameter("http.connection.timeout", 2000)
+    httpclient.getParams.setParameter("http.connection-manager.timeout", 2000L)
 
     try {
       val status_code = httpclient.executeMethod(httpget)
@@ -199,25 +263,15 @@ List(
         Nil
       else
         httpget.getResponseBody.toList
+    } catch {
+      case e : Exception => {
+        Log.error("download", e)
+        return Nil
+      }
     } finally {
       httpget.releaseConnection
     }
   }
-
-  /*
-  private var selector = 
-    new SimpleSelector(ports.length)
-
-  private def send(msg : List[Byte]) {
-    val port = ports(selector.get)
-    if(port.is_ready)
-      port.send_mms(msg)
-    else {
-      port.kill_session
-      send(msg)  // 尾递归，取用下一个port
-    }
-  }
-  */
 
   private def write_conf : Unit = {
     import java.io._
@@ -267,6 +321,25 @@ List(
       Some(request)
   }
 
+  private def is_of_future(request : String) : Boolean = {
+    // today_string的格式类似于当天的"19970530"。
+    val today_string : String = 
+      (new java.text.SimpleDateFormat("yyyyMMdd")).format(
+        java.util.Calendar.getInstance.getTime) 
+    
+    try {
+      val type_example = Array("a")
+      val fields : Array[String] = (new com.google.gson.Gson).fromJson(request, type_example.getClass)
+      ((!fields.isEmpty) && 
+       (!fields(0).isEmpty) &&
+       (fields(0)(0).isDigit) &&
+       (fields(0) > today_string))
+    } catch {
+      case e : Exception => 
+        return false
+    }
+  }
+
   def main_loop : Unit = {
     ports.foreach{p =>
       Log.info("MMS daemon", p.toString) }
@@ -282,9 +355,27 @@ List(
         if(port != None) {
           val request = get_request
           if(request != None) {
-            val msg : List[Byte] = make_mms_message(request.get)
-            port.get.send_mms(request.get, msg)
+            if(is_of_future(request.get)) {
+              KestrelHandler.put(request.get)
+              Log.debug("main_loop", request.get + " will be sent in future.")
+            }
+            else {
+              Log.info("main_loop", "Trying to send :" + request.get)
+              val msg : List[Byte] = make_mms_message(request.get)
+              port.get.send_mms(request.get, msg)
+            }
           }
+        }
+        
+        Thread.sleep(2000)
+        write_conf
+        if(remind_rearrange) {
+          remind_rearrange = false
+          KestrelHandler.rearrange_timed_messages
+          // 在进行上述的队列调整时，对队列的其它操作基本上是停下来的。
+          // 只有零星的并发可能是ModemPort将发送失败的彩信请求放回到队
+          // 列里，kestrel队列应该可以完善应付这种小的并发请求。而且，
+          // 无论如何，定时在未来的请求总也不会提前被发送。
         }
       } catch {
         case e : CannotDownloadException => {
@@ -298,64 +389,10 @@ List(
           Log.error("MMS daemon", "Above is an overall exception that is not caught in subroutines.")
         }
       }
-      Thread.sleep(2000)
-      write_conf
     }
   }
 }
 
-/*
-class SimpleSelector(max : Int) {
-  private var counter = 0
-
-  def get : Int = {
-    counter = (counter + 1) % max
-    counter
-  }
-}
-*/
-/**
- * 一个StepSelector在初始化中接受一个权重的表，每次调用get方法时，会得
- * 到一个从0到权重表长减一之间的值，表示选中了表中的某个元素的index。元
- * 素被选中的概率与归一化后的权重相同，而且在满足概率的前提下，能够尽量
- * 避免同一元素被连续选中两次。每次新建StepSelector对象后，第一个选中的
- * 元素是随机的。
- *
- * 算法的原理是使用一个固定的步长去遍历整个权重的区间，如果到头就折返。
- * 权重越高的元素，成为步长落脚处的机会也越多。
- */
-/*
-class StepSelector(weights : List[Int]) {
-  private val accumulated_weights = weights.scanLeft(0)(_ + _)
-  private val milestones = accumulated_weights.init
-  private val terminal_point = accumulated_weights.last
-
-  // 这个step_len，第一，应当与terminal_point互素，这样才能够遍历所有的
-  // 值，才能够精确地达到每个元素被选中的几率的要求；第二，必须大于最大
-  // 的weight区间的长度，这样才不会让同一个元素被连续选择2次以上。
-  private val step_len = {
-    val max_weight = weights.max
-    def gcd(a : Int, b : Int) : Int = 
-      if(b == 0) a else gcd(b, a % b)
-    def find_step_len(trial : Int) : Int = 
-      if(gcd(terminal_point, trial) == 1) trial
-      else find_step_len(trial + 1)
-    find_step_len(max_weight + 1)
-  }
-
-  println("step_len = " + step_len)
-
-  private var step_pointer = scala.util.Random.nextInt(terminal_point)
-
-  println("initialized step_pointer = " + step_pointer)
-
-  def get : Int = {
-    val selected = milestones.lastIndexWhere(_ <= step_pointer)     
-    step_pointer = (step_pointer + step_len) % terminal_point
-    selected
-  }
-}
-*/
 
 // 一个ModemPort对象的生存期贯穿从彩信模块开始运行到结束运行，与之相
 // 对，ModemSession对象则是为每条彩信建立一个。当ModemPort对象刚刚完成
@@ -404,21 +441,6 @@ class ModemPort(the_ip_addr : String, the_tcp_port : Int, the_capacity : Int, th
 
   def is_ready : Boolean = 
     (get_status_string == "Ready")
-
-/*
-    if(!enabled)
-      false
-    else if(!cooled_down)
-      false
-    else if(my_session == null)
-      true
-    else if(my_session.getState == Thread.State.TERMINATED) {
-      push_to_history(my_session.is_successful)
-      my_session = null
-      true
-    }
-    else false
-*/
 
   def change_capacity : Unit = {
     val place = capacity_list.indexOf(my_capacity)
@@ -524,4 +546,15 @@ class DummySession(ip_addr : String,
   }
 
   def is_successful : Boolean = (Random.nextInt(10) != 0)
+}
+
+class RearrangeTimedMessageRemindActor extends scala.actors.Actor {
+  def act : Unit = {
+    while(true) {
+      // 先发出提醒，再sleep，可以使得每一次启动彩信模块时，对队列的调
+      // 整至少执行一次。
+      MmsDaemon.remind_rearrange_timed_messages
+      Thread.sleep(12*60*60*1000)
+    }
+  }
 }
