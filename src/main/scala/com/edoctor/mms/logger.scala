@@ -4,14 +4,14 @@ import com.mongodb.Mongo
 import com.mongodb.BasicDBObject
 
 object Log {
-  private val mongo_coll = 
-    new Mongo("127.0.0.1").getDB("mmslog").getCollection("log" + time_string(System.currentTimeMillis))
-
   private val date_formatter = 
     new java.text.SimpleDateFormat("yyyy.MM.dd-kk:mm")
 
   private def time_string(time_millis : Long) : String = 
     date_formatter.format(new java.util.Date(time_millis))  
+
+  private val mongo_coll = 
+    new Mongo("127.0.0.1").getDB("mmslog").getCollection("log" + time_string(System.currentTimeMillis))
 
   private def write(log_data : BasicDBObject) : Unit = {
     log_data.put("time", time_string(System.currentTimeMillis))

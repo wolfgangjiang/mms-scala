@@ -9,72 +9,6 @@ import java.io.File
 import java.io.DataInputStream
 import java.io.FileInputStream
 
-/*
-object App {
-  val phones = Map("姜节汇" -> "13122747605",
-                   "王北南" -> "13501800943",
-                   "项国林" -> "15900673748",
-                   "吴愈" -> "13818696816",
-                   "李煜春" -> "18601665964",
-                   "褚红明" -> "13816465191",
-                   "周子予" -> "18602142887",
-                   "仓平" -> "13918814481",
-                   "李晨" -> "13761616139",
-                   "刘小杰" -> "13482134924",
-                   "徐佳伟" -> "13661503473",
-                   "张君君" -> "13671736062",
-                   "邹倚鸣" -> "13564316828",
-                   "李红旺" -> "15000479872")
-               
-  def makeMmsMessage : List[Byte] = {
-    val msg = new MMMessage()
-    msg.setMessageType(MMConstants.MESSAGE_TYPE_M_SEND_REQ)
-    msg.setTransactionId("0001")
-    msg.setFrom("+8615000279445/TYPE=PLMN")
-    msg.setTo("+86" + phones("姜节汇") + "/TYPE=PLMN")
-    //  msg.setTo("+8613122747605/TYPE=PLMN")
-    //  msg.setTo("+8613501800943/TYPE=PLMN")
-    msg.setSubject(" 彩信测试") // 第一个字符不能是汉字，可以是空格。
-    msg.setVersion(1)
-    msg.setContentType("application/vnd.wap.multipart.related")
-    
-
-    val fImage = new File("a.gif")
-    val data = new Array[Byte](fImage.length.toInt)
-    val dis = new DataInputStream(new FileInputStream(fImage))
-    dis.readFully(data)
-    dis.close()
-    msg.addPart("image/gif", data, false, null, null)
-
-    val text_data = "您好，这是测试彩信，祝您健康快乐。".getBytes("utf-8")
-    //  val text_data = "现在彩信可以同时发送文字、音乐和图片，到达率很高。文字可以很长。标题和内容都可以使用中文。君不见黄河之水天上来⑵，奔流到海不复回。　　君不见高堂明镜悲白发，朝如青丝暮成雪⑶。　　人生得意须尽欢⑷，莫使金樽空对月。　　天生我材必有用，千金散尽还复来。　　烹羊宰牛且为乐，会须一饮三百杯⑸。　　岑夫子，丹丘生⑹，将进酒，杯莫停⑺。　　与君歌一曲⑻，请君为我倾耳听。　　钟鼓馔玉不足贵⑽，但愿长醉不复醒。　　古来圣贤皆寂寞，惟有饮者留其名。　　陈王昔时宴平乐，斗酒十千恣欢谑⑿。　　主人何为言少钱⒀，径须沽取对君酌⒁。　　五花马⒂，千金裘，　　呼儿将出换美酒，与尔同销万古愁⒃。[1]".getBytes
-    msg.addPart("text/plain; charset=\"utf-8\"", text_data, false, null, null)
-
-    val f_midi = new File("a.mid")
-    val midi_data = new Array[Byte](f_midi.length.toInt)
-    val midi_dis = new DataInputStream(new FileInputStream(f_midi))
-    midi_dis.readFully(midi_data)
-    midi_dis.close()
-    msg.addPart("audio/midi; autostart=true", midi_data, false, null, null)
-
-    msg.encode.toList
-  }
-
-
-  def main(args : Array[String]) : Unit = {
-    println("Hello world.")
-    val session1 = new MmsSession("192.168.10.230", 964, makeMmsMessage)
-    session1.start
-    while(session1.getState != Thread.State.TERMINATED) {} // wait
-    if(!session1.is_successful) {
-      println("=================================================")
-      val session2 = new MmsSession("192.168.10.230", 964, makeMmsMessage)
-      session2.start
-    }
-  }
-}
-
-*/
 
 object SessionParameters {
   // receive_timeout_interval用于read_packet，如果超时就返回一个
@@ -145,12 +79,21 @@ object PacketKindDefinitions extends Enumeration{
 import PacketKindDefinitions._
 
 object SessionHelpers {
+  // 将List[Byte]表示的二进制串，转换为十六进制格式的字符串，供阅读和打
+  // 印。
   def list_to_hex(list : List[Byte]) : String = 
     list.map(x => String.format("%02X", new java.lang.Byte(x))).mkString(" ")
 
   def println_hex(data : List[Byte]) : Unit = 
     println(list_to_hex(data))
 
+  // 这里的escape，指的是ppp协议规定的0x7d escape。之所以要有这样一个
+  // escape，是因为ppp协议是基于可打印符号的，而且以0x7e为帧的分隔符。
+  // 所以，不可打印的控制字符，以及0x7e，都不允许出现在普通数据中，一旦
+  // 普通数据确实有这样的字节（普通数据是二进制数据，任何字节都可能
+  // 有），就必须加以转义（escape）。转义的规则是，将字节与0x20相异或，
+  // 然后在前面加上0x7d，表示该字节已经被转义。如果数据本身中有一个字节
+  // 是0x7d，该字节也要转义成为0x7d 0x5d两个字节。详见rfc 1662标准。
   def decode_escape(list : List[Byte]) : List[Byte] = {
     if(list.isEmpty)
       List[Byte]()
@@ -160,6 +103,7 @@ object SessionHelpers {
       list.head :: decode_escape(list.tail)
   }
 
+  // 参见函数decode_escape
   def encode_escape(list : List[Byte]) : List[Byte] = {
     def needs_escape(data : Byte) : Boolean = 
       (data < 0x20) || (List(0x7e, 0x7d, 0x91, 0x93) contains data)
@@ -172,8 +116,12 @@ object SessionHelpers {
       list.head :: encode_escape(list.tail)
   }
 
+  // fcs相关的函数，都是从rfc 1662附录所规定的循环冗余校验代码中改写过
+  // 来的。在rfc 1662标准的附录中，有C语言写的求校验的代码。
   private val fcs_table_16 = calculate_fcs_table_16
   
+  // 本函数仅仅在模块初始化时运行一次，函数的结果作为缓存，以加速以后的
+  // 校验运算。
   private def calculate_fcs_table_16():List[Int] = {
     var v = 0
     var the_table = List[Int]()
@@ -209,6 +157,7 @@ object SessionHelpers {
     fcs == 0xf0b8
   }
 
+  // 这里可以用split_word重写
   def attach_fcs16(data : List[Byte]) : List[Byte] = {
     val fcs = get_fcs16(data)
     val fcsLowOctet = (fcs & 0xFF).toByte
@@ -216,6 +165,8 @@ object SessionHelpers {
     data ++ List(fcsLowOctet, fcsHighOctet)
   }
 
+  // 这个校验和不是循环冗余，而是ip、tcp、udp所使用的奇偶校验和。这段代
+  // 码差不多也是从网上的相关既有代码中改写来的。
   def compute_checksum(data : List[Byte]) : Int = {
     def get_head_num(data : List[Byte]) : Int = 
       if(data.length == 1)
@@ -234,16 +185,26 @@ object SessionHelpers {
     (~recur(get_head_num(data), data.drop(2)) & 0xFFFF) // bits inversed
   }
 
+  // 将一段形如"15 0A C0"的十六进制字符串转化为它所表示的二进制串。这样
+  // 就给了我们手动输入一段二进制串的方便手段。
   def parse_hex(str : String) : List[Byte] = 
     str.split("\\s+").toList.filterNot(_ == "").map(x => Integer.parseInt(x, 16).toByte)
 
+  // 将一个两字节的int整数，转化为等价的2个二进制字节，高位在左，低位在
+  // 右，与tcp/ip协议数据包头部的规定相同。如果int整数超过0xFFFF，则超
+  // 过的部分被丢弃。
   def split_word(word : Int) : List[Byte] = 
     List(((word >> 8) & 0xFF).toByte, (word & 0xFF).toByte)
 
+  // 将一个四字节的int整数，转化为等价的4个二进制字节，高位在左，低位在
+  // 右，与tcp/ip协议数据包头部的规定相同。
   def split_double_word(doubleWord : Int) : List[Byte] = 
     split_word((doubleWord >> 16) & 0xFFFF) :::
     split_word(doubleWord & 0xFFFF)
 
+  // 这是split_word和split_double_word的逆运算，处理所有的字节，无论多
+  // 长。如果溢出也不作处理，所以一旦超过4个字节，也就是超过int的java表
+  // 示长度，就会产生错误的结果。
   def byte_list_to_int(list : List[Byte]) : Int = {
     def recur(list : List[Byte], number : Int) : Int =
       if(list.isEmpty)
@@ -254,38 +215,47 @@ object SessionHelpers {
     recur(list, 0)
   }
 
+  // 将形如"192.168.10.51"的字符串转化为二进制串。如果长度不是4个字节，
+  // 会抛出异常。
   def parse_ip(ip_str : String) : List[Byte] = {
     val ip_list = ip_str.split("\\.").toList.map(s => (s.toInt & 0xFF).toByte)
     assert(ip_list.length == 4)
     ip_list
   }
 
+  // parse_ip的逆运算，将二进制串表示的ip地址转化为“用点号分隔的数字”字
+  // 符串。
   def ip_to_string(ip_list : List[Byte]) : String = {
     assert(ip_list.length == 4)
     ip_list.map(x => (x.toInt & 0xFF)).mkString(".")
   }
-  
+
+  // 本函数非常长。它接受一个去掉了头尾0x7e标识、处理好了转义的ppp包，
+  // 分析里面是什么东西。有什么办法把它写得优雅一些呢？从某个角度看，它
+  // 很难简化，因为它本身表示的是复杂的、人为的协议标准，而不是简洁优雅
+  // 的数学逻辑。
   def parse_packet(data : List[Byte]) : Packet = {
     val unknown_report = new Packet(
       P_unknown_packet, Map("data" -> list_to_hex(data)))
     val corrupted_report = new Packet(
       P_corrupted_packet, Map("data" -> list_to_hex(data)))
 
-    if(data.length < 6)
-      return corrupted_report
+    if(data.length < 6)  // ppp包，头部4个字节，尾部2个字节校验和。
+      return corrupted_report // 太短的就不合法。
     
     if(data.slice(0,2) != List(0xFF, 0x03).map(_.toByte))
-      return unknown_report
+      return unknown_report // ppp包的开头两个字节必然是FF 03。
 
-    if(!is_fcs16_good(data))
+    if(!is_fcs16_good(data))  // 循环冗余校验
       return corrupted_report
 
-    byte_list_to_int(data.slice(2,4)) match {
-      case 0xC021 =>
-        if(data.length < 10)
-          corrupted_report
+    // ppp包的第3、4个字节是协议标识
+    byte_list_to_int(data.slice(2,4)) match {  
+      case 0xC021 =>  // C0 21表示LCP协议
+        if(data.length < 10)  // LCP包必须有类型、长度和option
+          corrupted_report // 这样处理可以避免数组越界异常
         else data(4).toInt match {
-          case 0x01 => 
+          case 0x01 =>  // Packet对象的第一个参数表示了它的类型。
             new Packet(P_lcp_config_req, 
                        Map("id" -> data(5), 
                            "options" -> data.drop(8).dropRight(2)))
@@ -297,7 +267,7 @@ object SessionHelpers {
                        Map("id" -> data(5)))
           case _ => unknown_report
         }
-      case 0xC023 =>
+      case 0xC023 =>  // C0 23表示PAP认证协议
         if(data.length < 6)
           corrupted_report
         else data(4).toInt match {
@@ -306,9 +276,10 @@ object SessionHelpers {
                        Map("id" -> data(5)))
           case _ => unknown_report
         }          
-      case 0x8021 =>
-        if(data.length < 14)
-          corrupted_report
+      case 0x8021 =>  // 80 21表示IPCP协议，为建立IP通讯作准备
+        if(data.length < 14)  // 如果数据包里不包含某个ip地址，
+          corrupted_report  // 那我们就不关心它，即便它不是corrupted，
+                            // 也是unknown的
         else {
           val param = Map("id" -> data(5),
                           "ip_addr" -> data.slice(10,14))
@@ -322,11 +293,11 @@ object SessionHelpers {
             case _ => unknown_report
           }
         }
-      case 0x0021 =>
+      case 0x0021 => // 00 21表示IP协议，网络层的主力协议
         // ppp frame wrapper = 6 bytes, ip header = 20 bytes
         // udp header = 8 bytes, wtp header = 3+ bytes
-        if(data.length < 37)
-          corrupted_report
+        if(data.length < 37) // 我们仅仅考虑里面是UDP和WTP、WSP协议的情况
+          corrupted_report  // 其它情况对我们来说无意义。
         else {          
           val wtp_pdu = data.drop(32).dropRight(2) 
           val tid = (byte_list_to_int(wtp_pdu.slice(1,3)) & 0x7F)
@@ -334,13 +305,13 @@ object SessionHelpers {
             case 0x02 => // wtp result
               if(wtp_pdu.length < 7)
                 corrupted_report
-              else wtp_pdu(3).toInt match {
+              else wtp_pdu(3).toInt match { // 这个字节是wsp类型
                 case 0x02 => 
                   new Packet(P_wsp_connect_reply,
                              Map("tid" -> tid,
                                  "session_id" ->
                                  get_first_uintvar(wtp_pdu.drop(4))))
-                case 0x04 =>
+                case 0x04 => // wsp reply
                   if(wtp_pdu(4) == 0x20)
                     new Packet(P_wsp_reply_success, 
                                Map("tid" -> tid))
@@ -352,7 +323,7 @@ object SessionHelpers {
             case 0x03 =>
               new Packet(P_wtp_ack, 
                          Map("tid" -> tid))
-            case 0x07 =>
+            case 0x07 =>  // 对重传的请求，对包里给出的psn（序列号）都要重传
               new Packet(P_wtp_nak,
                          Map("tid" -> tid, 
                              "psn" -> wtp_pdu.drop(4).take(wtp_pdu(3))))
@@ -364,6 +335,9 @@ object SessionHelpers {
     }
   } // parse_packet
 
+  // 从输入流中取得一个完整的ppp frame。如果在规定的timeout时间内无法取
+  // 得，就返回一个P_timeout类型的packet。这里的packet在以后是否应该都
+  // 改名叫frame？
   def read_packet(s_info : SessionInfo) : Packet = {
     var octet : Byte = 0
     var data = List[Byte]()
@@ -900,8 +874,8 @@ class MmsSession(modem_ip : String,
   def is_successful = this.success
 
   override def run : Unit = {
+    val tc = new TelnetClient
     try {
-      val tc = new TelnetClient
       try {
         tc.connect(modem_ip, modem_port)
         val s_info = new SessionInfo(
@@ -939,6 +913,12 @@ class MmsSession(modem_ip : String,
                   "Interrupted")
       case e : Exception =>
         Log.error(modem_ip + ":" + modem_port.toString, e)
+    } finally {
+      try {
+        tc.disconnect
+      } catch {
+        case e : Exception => { }
+      }
     }
   }
 }
