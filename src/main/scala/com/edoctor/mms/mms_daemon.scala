@@ -280,17 +280,21 @@ object MmsDaemon {
       msg.setFrom("+8615000279445")
       msg.setTo("+86" + target + "/TYPE=PLMN")
       msg.setSubject(" " + subject) // 如果前缀不加一个空格，就无法显示中文。
+      // 上面，对Subject，ascii字符可以显示，ascii字符后跟中文也可以显示，但
+      // 中文开头就是不能显示。所以要加一个空格。
       msg.setVersion(1)
       msg.setContentType("application/vnd.wap.multipart.mixed")
 
       if(!pic_data.isEmpty) // isEmpty也就是空表，也就是Nil，也就是List()
         msg.addPart("image/gif; name=\"imagepart.gif\"", pic_data.toArray, false, null, null)
-      // 全部当作gif发送，这是不合理的。以后要把它变得更加泛用化。
+      // 全部当作gif发送，这是不合理的。以后要把它变得更加泛用化，适应
+      // 更多的图片格式。name参数是必要的，如果不这样，那么除了Nokia之
+      // 外，各种手机都不能正常显示图片。
 
       msg.addPart("text/plain; charset=\"utf-8\"", (" " + text).getBytes("utf-8"), false, null, null) // String.getBytes返回的默认是utf-8编码。
 
       if(!mid_data.isEmpty)
-        msg.addPart("audio/midi; autostart=true", mid_data.toArray, false, null, null)
+        msg.addPart("audio/midi; autostart=true", mid_data.toArray, false, null, null)  // autostart参数看起来没有什么用处。
 
       Log.debug("make_mms_message", "All parts downloaded and added to message, now start encoding it.")
 

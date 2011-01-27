@@ -337,7 +337,8 @@ object SessionHelpers {
 
   // 从输入流中取得一个完整的ppp frame。如果在规定的timeout时间内无法取
   // 得，就返回一个P_timeout类型的packet。这里的packet在以后是否应该都
-  // 改名叫frame？
+  // 改名叫frame？ppp frame规定的分界符是0x7e，但是分界符0x7e本身不会被
+  // 本函数返回。
   def read_packet(s_info : SessionInfo) : Packet = {
     var octet : Byte = 0
     var data = List[Byte]()
@@ -367,12 +368,16 @@ object SessionHelpers {
               "warning of unhandled packet: " + packet)
   }
 
+  // ppp包开头是ff 03，后面跟着2个字节的协议指示，由调用者先提供好在参
+  // 数data里。包尾是2个字节的校验码。以上数据要加以0x7d的转义，最后前
+  // 后加上0x7e作为分界符。
   def ppp_encapsulate(data : List[Byte]) = 
     (0x7e.toByte +: 
      encode_escape(
        attach_fcs16(0xFF.toByte :: 0x03.toByte :: data))
      :+ 0x7e.toByte)
 
+    //这里的send有两个任务：发送和log。
   def send_packet(s_info : SessionInfo, data : List[Byte]) = {
     s_info.out_s.write(data.toArray)
     s_info.out_s.flush
@@ -380,6 +385,13 @@ object SessionHelpers {
               "sent: " + list_to_hex(decode_escape(data)))
   }
 
+  // 拨号的前提是AT+CGDCONT=1,"IP","CMWAP"已经设置好，也就是说
+  // AT+CGDCONT?命令能够返回一个正确的值。拨号本身的命令ATD*99***1#，最
+  // 后的那个"1"就是在AT+CGDCONT=1中设置的"1"。在第一个ppp数据包到来之
+  // 前，会有一些类似于CONNECT 115200这样的信息，在这里跳过，直到看到
+  // 0x7e。也可能拨号失败，失败时sim卡大致会返回NO CARRIER这样的信息或
+  // 者ERROR之类，总之是不会看到0x7e的。所以我们对0x7e的等待就会超时，
+  // 那时就返回false。
   def dial(s_info : SessionInfo) : Boolean = {
     // 发送拨号信息（这是假定sim卡已经配置好拨号前的准备）
 
@@ -401,12 +413,14 @@ object SessionHelpers {
     return false
   } 
 
+  // udp协议规定，校验和把包本身和pseudo header一起算出。这与tcp协议的
+  // 规定是完全相同的。
   def compute_udp_checksum(s_info : SessionInfo, 
                            datagram : List[Byte]) : Int = {
     val pseudo_header = 
       (parse_ip(s_info.ip_addr) :::
        parse_ip(wap_proxy_ip_addr) :::
-       split_word(0x0011) :::
+       split_word(0x0011) :::  // protocol = 0x0011 = udp
        split_word(datagram.length))
 
     compute_checksum(pseudo_header ::: datagram)
@@ -423,6 +437,7 @@ object SessionHelpers {
     header.take(10) ::: split_word(checksum) ::: header.drop(12)
   }
 
+  // 这包括udp与ip两层header。
   def udp_encapsulate(s_info : SessionInfo, 
                       payload : List[Byte]) : List[Byte] = {
     val udp_datagram = fill_in_udp_checksum(s_info,
@@ -446,11 +461,15 @@ object SessionHelpers {
       ip_header ::: udp_datagram)
   }
 
+  // uintvar是wap系列协议中规定的，可变长的int值，字节的最高位为1表示
+  // uintvar串未结束，最高位为0表示是uintvar串的最后一个字节。
   def get_first_uintvar(data : List[Byte]) : List[Byte] = {
-    val prefix = data.takeWhile( x => (x & 0x80) != 0 )
-    prefix :+ data(prefix.length)
+    val prefix = data.takeWhile( x => (x & 0x80) != 0 ) // 所有最高位为1的
+    prefix :+ data(prefix.length) // 第一个最高位为0的字节
   }
 
+  // 根据wap系列系列协议规定，将数字进行8位转7位的转换，留出最高位作为
+  // “连续指示位”。
   def int_to_uintvar(number : Int) : List[Byte] = {
     def recur(num : Int, seq : List[Byte]) : List[Byte] = 
       if(num == 0)
@@ -461,6 +480,8 @@ object SessionHelpers {
     recur(number >> 7, List((number & 0x7f).toByte))
   }
 
+  // 最高位是“连续指示位”，在这里可以忽略，因为get_first_uintvar已经确
+  // 定了uintvar在何处结束。
   def uintvar_to_int(sequence : List[Byte]) : Int = {
     def recur(num : Int, seq : List[Byte]) : Int = 
       if(seq.isEmpty)
@@ -474,6 +495,9 @@ object SessionHelpers {
 
 import SessionHelpers._
 
+
+// 这个类将“重传”的任务封装了起来。这样，调用者就不必关心重传的间隔要求、
+// 次数限制以及counter（当前已经重传到第几次）。
 class Retransmitter(packet : List[Byte], s_info : SessionInfo) {
   var last_sent_time = System.currentTimeMillis
   var counter = max_retransmit_times
@@ -492,8 +516,16 @@ class Retransmitter(packet : List[Byte], s_info : SessionInfo) {
   }
 }
 
+// 在本类中的parameters仅仅包含一些在本系统中关心的项目。不同类型的数据
+// 包，parameters的项目是不同的，所以使用动态的map。我们将所有协议的包
+// 都用这一个类表示，没有区分协议的层次。也许以后应该考虑开发区分协议层
+// 次的程序结构。
 case class Packet(kind : PacketKind, parameters : Map[String, Any])
 
+
+// 笼统地包含一个特定session的全部信息，跨越各层协议。它出现在各种函数
+// 的参数中，显得混乱。以后的改进也许是将相应的函数直接放入这个
+// SessionInfo类中，成为成员方法，那样就可以直接访问in_s、out_s等变量了。
 class SessionInfo(my_name : String, my_in_s : InputStream, my_out_s : OutputStream) {
   val name = my_name
   val in_s = my_in_s
@@ -501,8 +533,8 @@ class SessionInfo(my_name : String, my_in_s : InputStream, my_out_s : OutputStre
   var ip_addr = ""
   var session_id = List[Byte]()
 
-  private var ppp_id_counter = 0x10
-  def get_new_ppp_id : Byte = {
+  private var ppp_id_counter = 0x10 
+  def get_new_ppp_id : Byte = { // 它只有1个字节。
     ppp_id_counter += 1
     if(ppp_id_counter > 0x20)
       ppp_id_counter = 0x10
@@ -510,12 +542,13 @@ class SessionInfo(my_name : String, my_in_s : InputStream, my_out_s : OutputStre
   }
 
   private var ip_id_counter = (math.random * 40000).toInt
-  def get_new_ip_id : Int = {
+  def get_new_ip_id : Int = {  // 它有4个字节，初始值是随机的。
     ip_id_counter += 1
     ip_id_counter
   }
 
-  // wtp的tid与ppp的共用计数器，似乎效果还不坏。
+  // wtp的tid与ppp的共用计数器，似乎效果还不坏。当然，问题在于，wtp的
+  // tid规定是2个字节的。
   def get_new_wtp_tid : Int = {
     get_new_ppp_id.toInt & 0xFF
   }
@@ -528,20 +561,26 @@ class SessionException(msg : String) extends RuntimeException {
 }
 
 object SessionHandlers {
+  // LCP建立连接，协议的规定是，双方对等，都主动向对方发送config
+  // request，在接收到config request时，发送一个id相同的config ack，当
+  // 双方都收到config ack，就是连接建立成功。如果没有收到config ack，就
+  // 重传config request，直到超出重传次数限制。如果对方的options中有些
+  // 我们不能接受，我们还可以发送config nak去回绝它，但是发送彩信时我们
+  // 遇到的对方options都可以接受。
   def lcp_connect(s_info : SessionInfo) : Unit = {
     val our_config_req_id = s_info.get_new_ppp_id
 
     def make_lcp_config_req : List[Byte] = 
       ppp_encapsulate(
-        0xC0.toByte :: 0x21.toByte ::
-        0x01.toByte :: our_config_req_id ::
+        0xC0.toByte :: 0x21.toByte :: // 0xC021 = protocol = LCP
+        0x01.toByte :: our_config_req_id ::  // 0x01 = type = config req
         split_word(our_lcp_config_req_options.length + 4) :::
         our_lcp_config_req_options)
 
     def make_lcp_config_ack(param : Map[String, Any]) : List[Byte] = 
       ppp_encapsulate(
-        0xC0.toByte :: 0x21.toByte ::
-        0x02.toByte :: param("id").asInstanceOf[Byte] ::
+        0xC0.toByte :: 0x21.toByte :: // 0xC021 = protocol = LCP
+        0x02.toByte :: param("id").asInstanceOf[Byte] :: // 0x02 = conf ack
         split_word(param("options").asInstanceOf[List[Byte]].length + 4) :::
         param("options").asInstanceOf[List[Byte]])
 
@@ -570,13 +609,16 @@ object SessionHandlers {
     }
   }
 
+  // LCP结束连接。按照协议规定，任何一方可以单方面发起结束连接，发送
+  // terminate request，对方应回复terminate ack。如果成功收到terminate
+  // ack，连接成功结束，否则重传。
   def lcp_terminate(s_info : SessionInfo) : Unit = {
     val our_terminate_req_id = s_info.get_new_ppp_id
 
     def make_lcp_terminate_req : List[Byte] = 
       ppp_encapsulate(
-        0xC0.toByte :: 0x21.toByte ::
-        0x05.toByte :: our_terminate_req_id ::
+        0xC0.toByte :: 0x21.toByte ::  // 0xC021 = protocol = LCP
+        0x05.toByte :: our_terminate_req_id :: // 0x05 = type = termi req
         0x00.toByte :: 0x04.toByte :: Nil) // length is fixed
 
     val our_terminate_req = make_lcp_terminate_req
@@ -599,13 +641,15 @@ object SessionHandlers {
     }
   }
 
+  // 彩信网关（代理？）的连接不需要用户名和密码，pap的用户名和密码都设置
+  // 为单字节"00"。只要得到了auth ack就成功。
   def pap_authenticate(s_info : SessionInfo) : Unit = {
     val our_auth_req_id = s_info.get_new_ppp_id
 
     def make_pap_auth_req : List[Byte] = 
       ppp_encapsulate(
-        0xC0.toByte :: 0x23.toByte ::
-        0x01.toByte :: our_auth_req_id :: 
+        0xC0.toByte :: 0x23.toByte ::  // 0xC023 = protocol = PAP
+        0x01.toByte :: our_auth_req_id :: // 0x01 = type = auth req
         split_word(our_pap_auth_req_info.length + 4) :::
         our_pap_auth_req_info)
 
@@ -625,10 +669,22 @@ object SessionHandlers {
         case _ =>
           warn_unhandled_packet(s_info, packet)
       }
-      retransmitter.visit
+      retransmitter.visit  // 可能重传，也可能不重传，由retransmitter决定
     }
   }
 
+  // IPCP协议交互的任务是获得一个对方分配的IP地址。过程是这样的：(1)我
+  // 们发送一个config req，请求ip地址0.0.0.0，同时对方主动发给我们一个
+  // config req，声明它自己的ip地址，在我们在翼多的调试中总是
+  // 192.168.111.111。这个对方的ip地址是无线路由器的ip地址，因为现在我
+  // 们还在ppp阶段，只是一个local network，没有ip地址，是不能够穿过路由
+  // 器到达外面广大的internetwork中的。(2)我们认可对方的ip，发送一个
+  // 192.168.111.111的config ack给它。同时，对方驳回我们的请求，发给我
+  // 们一个config nak，毕竟0.0.0.0是不可能分配给我们的。在config
+  // nak中，会包含一个对方建议我们采用（分配给我们）的ip，是随机的，在
+  // 我们国内一般都是10.*.*.*。(3)我们用它给我们的ip地址来再次申请，发
+  // 送config req，它让我们申请哪个，我们就申请哪个。这样，它就会返回
+  // config ack，认可我们的申请。然后，我们就可以开始使用这个ip地址了。
   def ipcp_configure(s_info : SessionInfo) : Unit = {
     val our_first_config_req_id = s_info.get_new_ppp_id
     val our_second_config_req_id = s_info.get_new_ppp_id
@@ -636,16 +692,16 @@ object SessionHandlers {
     // ipcp config req的长度固定为10字节，因为ip地址的长度固定为4字节。
     def make_ipcp_config_req(id : Byte, ip_addr : List[Byte]) : List[Byte] =
       ppp_encapsulate(
-        0x80.toByte :: 0x21.toByte ::
-        0x01.toByte :: id ::
+        0x80.toByte :: 0x21.toByte ::  // protocol = 0x8021 = IPCP
+        0x01.toByte :: id ::          // 0x01 = type = config request
         0x00.toByte :: 0x0A.toByte :: // fixed length = 10
-        0x03.toByte :: 0x06.toByte ::
+        0x03.toByte :: 0x06.toByte :: // 0x03 = ip addr, 0x06 = length
         ip_addr)
 
     def make_ipcp_config_ack(param : Map[String, Any]) : List[Byte] =
       ppp_encapsulate(
         0x80.toByte :: 0x21.toByte ::
-        0x02.toByte :: param("id").asInstanceOf[Byte] ::
+        0x02.toByte :: param("id").asInstanceOf[Byte] :: // 0x02 = conf ack
         split_word(param("ip_addr").asInstanceOf[List[Byte]].length + 6) :::
         0x03.toByte :: 0x06.toByte :: 
         param("ip_addr").asInstanceOf[List[Byte]])
@@ -653,9 +709,9 @@ object SessionHandlers {
     val our_first_config_req = 
       make_ipcp_config_req(our_first_config_req_id, 
                            List(0,0,0,0).map(_.toByte))
-    var our_second_config_req = List[Byte]()    
+    var our_second_config_req = List[Byte]()    //这是要在运行中才知道的
 
-    var assigned_ip_addr = List[Byte]()
+    var assigned_ip_addr = List[Byte]()  // 运行中才知道
     var config_req_rcvd = false
 
     send_packet(s_info, our_first_config_req)
@@ -690,6 +746,10 @@ object SessionHandlers {
     s_info.ip_addr = ip_to_string(assigned_ip_addr)
   }
 
+  // 发送一个连接请求，是wtp的invoke类型以及wsp的connect类型。它会被包
+  // 在udp包中传输。session id在解除连接时有用，其它大部分时候没用。
+  // session id似乎支持“暂停和恢复连接”的功能，不过我们并没有用到“暂停
+  // 和恢复”的功能。在连接时，要协商capabilities。
   def wsp_connect(s_info : SessionInfo) : Unit = {
     val connect_tid = s_info.get_new_wtp_tid
     def make_invoke_connect_pdu : List[Byte] = {
@@ -698,7 +758,7 @@ object SessionHandlers {
       // GTR = 0, TTR = 0, RID = 0; 而0x02的意思是：Version = 0b00,
       // TIDnew = 0, U/P = 0, TCL = 0b10 = 0x02。
 
-      val s_sdu_size_hex = 
+      val s_sdu_size_hex = // 参见前面关于sdu_size_capability的注释
         0x81.toByte :: int_to_uintvar(wsp_server_sdu_size_capability)
       val c_sdu_size_hex = 
         0x80.toByte :: int_to_uintvar(wsp_client_sdu_size_capability)
@@ -743,6 +803,8 @@ object SessionHandlers {
     }
   }
 
+  // 解除wsp连接，单方面发送一个wsp disconnect包，放在wtp invoke中，不
+  // 会有应答。
   def wsp_disconnect(s_info : SessionInfo) : Unit = {
     val disconnect_tid = s_info.get_new_wtp_tid
     def make_invoke_disconnect_pdu : List[Byte] = {
@@ -763,6 +825,7 @@ object SessionHandlers {
     // 不会有应答
   }
 
+  // 将彩信分组，用wtp和wsp协议发送出去。
   def send_mms(s_info : SessionInfo, msg_data : List[Byte]) : Unit = {
     val tid = s_info.get_new_wtp_tid
     // 这个tid是transaction id，也即是序列号的意思。分组的多个wtp
@@ -787,9 +850,13 @@ object SessionHandlers {
       val first_wtp_pdu_header = 
         0x08.toByte +: split_word(tid) :+ 0x02.toByte
       val first_wtp_pdu = first_wtp_pdu_header ::: wsp_fragments.head
-      // 上面的这个wtp的pdu的确是invoke，但是与函数make_wtp_invoke_pdu中
-      // 不同，因为GTR与TTR两个都清零了，表示后面有其它的分组。
+      // 上面的这个wtp的pdu的确是invoke，但是与函数make_wtp_invoke_pdu
+      // 中不同，因为GTR与TTR两个位都清零了，表示后面有其它的分组，也就
+      // 是其它的fragment。
 
+      // 这个make_wtp_more_pdus可能返回一个空表。它对frag_list中的每一
+      // 个都包上一个wtp的头部，设置好psn序列号。一律设置为后面有其它的
+      // 分组。
       def make_wtp_more_pdus(wsp_frag_list : List[List[Byte]],
                              psn : Int) : List[List[Byte]] 
       // psn = packet sequence number
@@ -806,6 +873,9 @@ object SessionHandlers {
 
       val raw_wtp_pdu_list : List[List[Byte]] = 
         first_wtp_pdu :: make_wtp_more_pdus(wsp_fragments.tail, 1)
+      // raw_wtp_pdu_list所有的分组都指示后面有其它的分组，包括最后一个。
+      // 所以，最后一个分组要调整。这最后一个也可能根本就是第一个，也就
+      // 是说前后一共只有一个分组。下面的代码能够正确地处理这些情况。
       val last_wtp_pdu = raw_wtp_pdu_list.last
       val last_wtp_pdu_with_signal = 
         (last_wtp_pdu.head | 0x02).toByte :: last_wtp_pdu.tail
@@ -814,7 +884,7 @@ object SessionHandlers {
       val wtp_pdu_list = 
         raw_wtp_pdu_list.init :+ last_wtp_pdu_with_signal
 
-      wtp_pdu_list
+      wtp_pdu_list //这个返回的表就可以直接用udp打包后发送出了。
     }
 
     val wtp_fragments = 
@@ -825,7 +895,8 @@ object SessionHandlers {
 
     wtp_fragments.foreach(send_one_fragment)
     var timeout_counter = 30
-    
+
+    // 这里对指定的分组，也就是对指定的fragment进行重传。
     def resend(fragment : List[Byte]) : Unit = {
       val new_fragment = (fragment.head & 0x01).toByte :: fragment.tail
       // set RID = 1, which means this pdu is being retransmitted
@@ -835,12 +906,15 @@ object SessionHandlers {
     while(timeout_counter > 0) {
       val packet = read_packet(s_info)
       packet match {
-        case Packet(P_wtp_ack, param) =>
-          if(param("tid") == tid)
-            {} // do nothing
+        // 似乎会得到两个wtp应答，一个是对fragment group的应答，另一个
+        // 是对message的应答。我们这里整个message只有一个fragment
+        // group，没有细分，可以稳定发送彩信。
+        case Packet(P_wtp_ack, param) => // 只要成功，wtp和wsp都会应答
+          if(param("tid") == tid)   // 不过在这里我们只关心wsp的应答
+            {} // do nothing   
           else
             warn_unhandled_packet(s_info, packet)
-        case Packet(P_wtp_nak, param) =>
+        case Packet(P_wtp_nak, param) =>  // 需要重传，然后再等待应答
           if(param("tid") == tid) {
             param("psn").asInstanceOf[List[Byte]].foreach { 
               psn => resend(wtp_fragments(psn)) }
@@ -873,30 +947,32 @@ class MmsSession(modem_ip : String,
 
   def is_successful = this.success
 
+  // 发送彩信的全过程有10个步骤。
   override def run : Unit = {
-    val tc = new TelnetClient
+    val tc = new TelnetClient  // 如果使用简单的tcp socket，会有数据转
+                               // 义问题，不能正常地收到ppp包。
     try {
       try {
-        tc.connect(modem_ip, modem_port)
+        tc.connect(modem_ip, modem_port)  // 1. 建立telnet连接
         val s_info = new SessionInfo(
           modem_ip + ":" + modem_port.toString, 
           tc.getInputStream, tc.getOutputStream)
-        if(dial(s_info)) {
+        if(dial(s_info)) {  // 2. 拨号
           try {
-            SessionHandlers.lcp_connect(s_info)
-            SessionHandlers.pap_authenticate(s_info)
-            SessionHandlers.ipcp_configure(s_info)
+            SessionHandlers.lcp_connect(s_info)  // 3. 建立lcp连接 
+            SessionHandlers.pap_authenticate(s_info) // 4. pap验证
+            SessionHandlers.ipcp_configure(s_info) // 5. ipcp交互
             Log.info(s_info.name, "My Ip Address: " + s_info.ip_addr)
             try {
-              SessionHandlers.wsp_connect(s_info)
-              SessionHandlers.send_mms(s_info, msg_data)
+              SessionHandlers.wsp_connect(s_info) // 6. wsp连接
+              SessionHandlers.send_mms(s_info, msg_data) // 7. 发送彩信
               success = true
               Log.info(s_info.name, " ******* Success! ******* ")
             } finally {
-              SessionHandlers.wsp_disconnect(s_info)
+              SessionHandlers.wsp_disconnect(s_info) // 8. wsp解除连接
             }
           } finally {
-            SessionHandlers.lcp_terminate(s_info)
+            SessionHandlers.lcp_terminate(s_info) // 9. lcp解除连接
           }
         } else throw new SessionException("No carrier")
       } catch {
@@ -905,7 +981,7 @@ class MmsSession(modem_ip : String,
         case e : java.net.ConnectException => 
           Log.error(modem_ip + ":" + modem_port.toString, e)
       } finally {
-        tc.disconnect
+        tc.disconnect // 10. telnet解除连接
       }    
     } catch {
       case e : InterruptedException => 
@@ -915,7 +991,12 @@ class MmsSession(modem_ip : String,
         Log.error(modem_ip + ":" + modem_port.toString, e)
     } finally {
       try {
-        tc.disconnect
+        tc.disconnect  // 最后一定要避免这个线程一直拿着telnet连接不放。
+                       // 因为短信猫一个端口只能同时接受一个连接。如果
+                       // 这个线程被丢弃，我们放弃对它的java引用，而它
+                       // 一直拿着telnet连接，那么除了整个系统退出（强
+                       // 行释放所有连接）之外，没有别的办法再建立对那
+                       // 个端口的连接了。
       } catch {
         case e : Exception => { }
       }
