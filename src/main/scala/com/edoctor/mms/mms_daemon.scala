@@ -101,7 +101,11 @@ object KestrelHandler {
       case e : Exception => {
         i_am_fine = false 
         Log.error("KestrelHandler", e)
-        client = initialize_client
+        // 不要在此处调用initialize_client。已有的client能够自动识别
+        // 重新启动的队列。如果在这里调用initialized_client，而不先将
+        // 已有的client 进行shutdown，反而会耗尽socket连接句柄，造成
+        // too many open files异常。
+//        client = initialize_client
         return null
       }
     }
@@ -118,13 +122,14 @@ object KestrelHandler {
       case e : Exception => {
         i_am_fine = false 
         Log.error("KestrelHandler", e)
-        client = initialize_client
+        // 不要在此处调用initialize_client，参见get()方法对此的注释。
+//        client = initialize_client
       }
     }
   }
 
   // 在彩信模块退出前，应当显示地调用本方法。如果不shutdown就强制退出，
-  // 会发生什么事呢？不清楚。
+  // 会打开的文件（或socket句柄）未释放。
   def shutdown : Unit = client.shutdown
 
   // 这个函数对整个mms队列进行重新排序，将定时在当天的彩信请求放到队列
@@ -369,6 +374,7 @@ object MmsDaemon {
     try {
       writer = new FileWriter(filename)
       writer.write(info_string + ports.map(_.to_conf_string).mkString("\n"))
+      writer.close
     } catch {
       case e : IOException => {
         Log.error("write_conf", e)
@@ -381,6 +387,7 @@ object MmsDaemon {
         case e : Exception => { }
       }
     }
+    writer = null
   }
 
   
