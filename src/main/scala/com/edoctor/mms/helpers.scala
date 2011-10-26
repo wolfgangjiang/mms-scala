@@ -115,11 +115,13 @@ object SessionParameters {
 
   val max_retransmit_times = 3
 
+  val initial_ppp_id = 0x10.toByte 
+
   val our_lcp_config_req_options = parse_hex("02 06 00 00 00 00")
 
   val our_pap_auth_req_info = parse_hex("00 00")
 
-  val wap_proxy_ip_addr = "10.0.0.172"
+  val wap_proxy_ip_addr = parse_ip("10.0.0.172")
   val wap_proxy_port = 9201
   val our_port = 2048
   // 我们的ip地址是动态获取的

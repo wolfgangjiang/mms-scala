@@ -9,14 +9,17 @@ import SessionHelpers._
 
 @RunWith(classOf[JUnitRunner]) 
 class IpDatagramSpecBasic extends Spec with ShouldMatchers {
-  val example_bytes = parse_hex("45 00 00 6c 92 cc 00 00 38 06 e4 04 92 95 ba 14 a9 7c 15 95") ++ List.fill(0x6c - 20)(0xAB.toByte)
+  val example_bytes = parse_hex("45 00 02 0e fc 9b 40 00 fe 11 15 7a ac 15 00 04 c0 a8 fc 06") ++ parse_hex("DA DA")
   describe("ip datagram object") {
-    it("can parse a datagram without checking checksum") {
-      val datagram = IpDatagram.parse(example_bytes)
-      datagram.source_ip_addr should be (parse_hex("92 95 ba 14"))
-      datagram.destination_ip_addr should be (parse_hex("a9 7c 15 95"))
-      datagram.data should be (List.fill(0x6c - 20)(0xAB.toByte))
-      datagram.total_length should be (0x6c)
+    it("unpacks a good datagram as a Right()") {
+      val unpacked = IpDatagram.unpack(example_bytes)
+      unpacked should be a ('right)
+      unpacked.right.get should be (parse_hex("DA DA"))
+    }
+    it("unpacks a bad datagram as a Left()") {
+      val bad_example = example_bytes.patch(5, parse_hex("00 00"), 2)
+      val unpacked = IpDatagram.unpack(bad_example)
+      unpacked should be a ('left)
     }
     it("provides checksum calculating outside parsing") {
       expect(true) {
@@ -26,12 +29,13 @@ class IpDatagramSpecBasic extends Spec with ShouldMatchers {
   }
 
   describe("ip datagram class") {
+    val segment = new UdpDatagram(123, 321, parse_hex("DA DA"))
     val datagram = new IpDatagram(
       0x1234, parse_ip("10.123.221.2"), parse_ip("10.0.0.127"), 
-      parse_hex("DA DA"))
+      segment)
     it("can convert to bytes") {
-      datagram.total_length should be (22)
-      datagram.bytes should have length(22) // 20 + 2
+      datagram.total_length should be (30)
+      datagram.bytes should have length(30) // 20 + 8 + 2
     }
     it("has a correct checksum") {
       compute_checksum(datagram.bytes.take(20)) should be (0)
@@ -41,19 +45,27 @@ class IpDatagramSpecBasic extends Spec with ShouldMatchers {
 
 @RunWith(classOf[JUnitRunner]) 
 class UdpDatagramSpecBasic extends Spec with ShouldMatchers {
-  val source_ip_addr = parse_ip("10.123.221.2")
-  val destination_ip_addr = parse_ip("10.0.0.127")
+  val source_ip_addr = parse_hex("ac 15 00 04")
+  val destination_ip_addr = parse_hex("c0 a8 fc 06")
   describe("udp datagram object") {
-    val example_bytes = parse_hex("1A 1A 40 11 00 0A 00 00 DA DA")
-    it("can parse a datagram without checking checksum") {
-      val datagram = UdpDatagram.parse(example_bytes)
-      datagram.source_port should be (0x1A1A)
-      datagram.destination_port should be (0x4011)
-      datagram.length should be (10)
-      datagram.data should be (parse_hex("DA DA"))
+    val example_bytes = parse_hex("00 43 00 44 01 fa 5d 4c 02 01 06 00 2e 21 0f 17 00 00 00 00 00 00 00 00 c0 a8 fc 06 ac 15 00 02 00 00 00 00 08 00 20 11 e0 1b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 63 82 53 63 35 01 05 36 04 ac 15 00 04 01 04 ff ff ff 00 03 04 c0 a8 fc 01 1c 04 c0 a8 fc ff 40 09 64 68 63 70 2e 74 65 73 74 33 04 00 00 0e 10 02 04 ff ff c7 c0 04 04 ac 15 00 04 0f 10 73 6e 74 2e 65 61 73 74 2e 73 75 6e 2e 63 6f 6d 06 04 ac 15 00 01 0c 07 77 68 69 74 65 2d 36 2b a6 02 04 81 94 ae 1b 03 08 61 74 6c 61 6e 74 69 63 0a 04 81 94 ae 1b 0b 08 61 74 6c 61 6e 74 69 63 0f 05 78 74 65 72 6d 04 35 2f 65 78 70 6f 72 74 2f 73 32 38 2f 62 61 73 65 2e 73 32 38 73 5f 77 6f 73 2f 6c 61 74 65 73 74 2f 53 6f 6c 61 72 69 73 5f 38 2f 54 6f 6f 6c 73 2f 42 6f 6f 74 0c 20 2f 65 78 70 6f 72 74 2f 73 32 38 2f 62 61 73 65 2e 73 32 38 73 5f 77 6f 73 2f 6c 61 74 65 73 74 07 1b 2f 70 6c 61 74 66 6f 72 6d 2f 73 75 6e 34 6d 2f 6b 65 72 6e 65 6c 2f 75 6e 69 78 08 07 45 53 54 35 45 44 54 ff")
+
+    it("unpacks a good datagram as a Right()") {
+      val unpacked = UdpDatagram.unpack(
+        example_bytes, source_ip_addr, destination_ip_addr)
+      unpacked should be a ('right)
+      unpacked.right.get should be (example_bytes.drop(8))
     }
+
+    it("unpacks a bad datagram as a Left()") {
+      val bad_example = 0xFF.toByte :: example_bytes.tail
+      val unpacked = UdpDatagram.unpack(
+        bad_example, source_ip_addr, destination_ip_addr)
+      unpacked should be a ('left)
+    }
+
     it("provides checksum calculating outside parsing") {
-      expect(false) {
+      expect(true) {
         UdpDatagram.is_checksum_good(
           example_bytes, source_ip_addr, destination_ip_addr)
       }
@@ -80,3 +92,55 @@ class UdpDatagramSpecBasic extends Spec with ShouldMatchers {
     }
   }
 }
+
+@RunWith(classOf[JUnitRunner])
+class WapSpecBasic extends Spec with ShouldMatchers {
+  describe("WtpHeader") {
+    it("is fine with typical connect invoke") {
+      expect(parse_hex("0A 00 01 02")) {
+        (new WtpHeader(PduType.Invoke, 1, true, 2, 0)).bytes
+      }
+    }
+
+    it("is fine with typical disconnect invoke") {
+      expect(parse_hex("0A 00 01 00")) {
+        (new WtpHeader(PduType.Invoke, 1, true, 0, 0)).bytes
+      }
+    }
+
+    it("is fine with typical segmented invoke") {
+      expect(parse_hex("28 00 02 25")) {
+        (new WtpHeader(PduType.SegmentedInvoke, 2, false, 0, 0x25)).bytes
+      }
+    }
+
+    it("can recognize pdu type from byte list") {
+      expect(PduType.Result) {
+        WtpHeader.get_pdu_type(parse_hex("12 80 01"))
+      }
+    }
+  }
+
+  describe("uintvar converters") {
+    import WspAutomaton._
+    it("can convert int to uintvar") {      
+      int_to_uintvar(40) should be (parse_hex("28"))
+      int_to_uintvar(508) should be (parse_hex("83 7c"))
+    }
+
+    it("can convert uintvar to int") {
+      uintvar_to_int(parse_hex("28")) should be (40)
+      uintvar_to_int(parse_hex("83 7c")) should be (508)
+    }
+  }
+}
+
+//WspAutomaton should:
+// send connect invoke and ack on connecting
+// send disconnect invoke on disconnecting
+// make correct segmentations on long data
+// send segmentations in send_mms
+// retransmit when timeout
+// throw SessionTimeoutException if too many timeouts
+// retransmit specified segment on remote nak
+// throw SessionTimeoutException if cannot receive remote ack

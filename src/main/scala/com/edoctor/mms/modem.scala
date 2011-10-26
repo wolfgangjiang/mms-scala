@@ -30,19 +30,28 @@ trait ActualRemote extends AbstractRemote {
   }
 }
 
-abstract class AbstractDuplex {
+abstract class AbstractDuplex(initial_id : Int) {
   def say_text(command : String) : Unit
   def listen_text(timeout_millis : Long) : String
   def read_ppp(timeout_millis : Long) : PppFrame
   def write_ppp(frame : PppFrame) : Unit
+
+  private var id_counter : Int = initial_id
+  def get_ppp_id : Byte = { // 它只有1个字节。
+    id_counter += 1
+    // set a cap to avert complications on negative Byte numbers
+    if(id_counter > 0x30)  
+      id_counter = 0x10
+    id_counter.toByte
+  }
 }
 
 // incoming terminate request should be handled by low level duplex
 // and throw an "ClosedByRemoteException" to indicate total failure.
 // this class is not covered by mocked unit tests
 class ActualDuplex(val in_s : java.io.InputStream,
-                   val out_s : java.io.OutputStream) 
-extends AbstractDuplex {
+                   val out_s : java.io.OutputStream)
+extends AbstractDuplex(initial_ppp_id) {
   def say_text(command : String) : Unit = {
     out_s.write((command + "\r").getBytes)
     out_s.flush
@@ -249,20 +258,11 @@ object PppFrame {
         case Protocol.LCP => LcpPacket.parse(payload_data)
         case Protocol.PAP => PapPacket.parse(payload_data)
         case Protocol.IPCP => IpcpPacket.parse(payload_data)
-        case _ => new ErrorMessage("not implemented yet")
+        case Protocol.IP => IpDatagram.parse(payload_data)
+        case _ => throw new InvalidComposeException
       }
       new PppFrame(protocol, payload_packet)
     }
-  }
-}
-
-class PppIdCounter(initial : Int) {
-  private var counter : Int = initial 
-  def get_id : Byte = { // 它只有1个字节。
-    counter += 1
-    if(counter > 0x30)
-      counter = 0x10
-    counter.toByte
   }
 }
 
@@ -341,8 +341,7 @@ class LcpPacket(val code : LcpCode,
 // LCP结束连接。按照协议规定，任何一方可以单方面发起结束连接，发送
 // terminate request，对方应回复terminate ack。如果成功收到terminate
 // ack，连接成功结束，否则重传。
-class LcpAutomaton(val duplex : AbstractDuplex, 
-                   val id_counter : PppIdCounter) {
+class LcpAutomaton(val duplex : AbstractDuplex) {
   import LcpState._
 
   sealed abstract class LcpEvent
@@ -380,7 +379,7 @@ class LcpAutomaton(val duplex : AbstractDuplex,
       if(recent_sent_packet != null) {
         val retransmit_packet = new LcpPacket(
           recent_sent_packet.code,
-          id_counter.get_id,  // a new id
+          duplex.get_ppp_id,  // a new id
           recent_sent_packet.data)
         send_packet(retransmit_packet)
       }
@@ -499,7 +498,7 @@ class LcpAutomaton(val duplex : AbstractDuplex,
   def send_config_request : Unit = {
     val packet = new LcpPacket(
       LcpCode.ConfigureRequest, 
-      id_counter.get_id, 
+      duplex.get_ppp_id, 
       our_lcp_config_req_options)
 
     send_packet(packet)
@@ -516,7 +515,7 @@ class LcpAutomaton(val duplex : AbstractDuplex,
 
   def send_terminate_req : Unit = {
     val packet = new LcpPacket(
-      LcpCode.TerminateRequest, id_counter.get_id, Nil)
+      LcpCode.TerminateRequest, duplex.get_ppp_id, Nil)
 
     send_packet(packet)
   }
@@ -592,8 +591,7 @@ class PapPacket(val code : PapCode,
 
 // 彩信网关（代理？）的连接不需要用户名和密码，pap的用户名和密码都设置
 // 为单字节"00"。只要得到了auth ack就成功。
-class PapAutomaton(val duplex : AbstractDuplex,
-                   val id_counter : PppIdCounter) {
+class PapAutomaton(val duplex : AbstractDuplex) {
   private var the_recent_sent_packet : PapPacket = null
   def recent_sent_packet = the_recent_sent_packet
   private var the_request_sent_time : Long = System.currentTimeMillis
@@ -607,7 +605,7 @@ class PapAutomaton(val duplex : AbstractDuplex,
     
   def authenticate : Unit = {
     val auth_req = new PapPacket(PapCode.AuthenticateRequest, 
-                                 id_counter.get_id, 
+                                 duplex.get_ppp_id, 
                                  our_pap_auth_req_info)
     send_packet(auth_req)
     read_from_remote_and_process
@@ -644,7 +642,7 @@ class PapAutomaton(val duplex : AbstractDuplex,
     if(recent_sent_packet != null) {
       val retransmit_packet = new PapPacket(
         recent_sent_packet.code,
-        id_counter.get_id,  // a new id
+        duplex.get_ppp_id,  // a new id
         recent_sent_packet.data)
       send_packet(retransmit_packet)
     }
@@ -736,8 +734,7 @@ class IpcpPacket(val code : IpcpCode,
 // 我们国内一般都是10.*.*.*。(3)我们用它给我们的ip地址来再次申请，发
 // 送config req，它让我们申请哪个，我们就申请哪个。这样，它就会返回
 // config ack，认可我们的申请。然后，我们就可以开始使用这个ip地址了。
-class IpcpAutomaton(val duplex : AbstractDuplex,
-                    val id_counter : PppIdCounter) {
+class IpcpAutomaton(val duplex : AbstractDuplex) {
   private var recent_sent_packet : IpcpPacket = null
   private var recent_received_packet : IpcpPacket = null
   private var my_ip_list : List[Byte] = null
@@ -798,7 +795,7 @@ class IpcpAutomaton(val duplex : AbstractDuplex,
   def send_first_config_request : Unit = {
     val first_config_req = new IpcpPacket(
       IpcpCode.ConfigureRequest, 
-      id_counter.get_id, 
+      duplex.get_ppp_id, 
       parse_hex("00 00 00 00"))
     
     send_packet(first_config_req)
@@ -807,7 +804,7 @@ class IpcpAutomaton(val duplex : AbstractDuplex,
   def send_second_config_request : Unit = {
     val second_config_req = new IpcpPacket(
       IpcpCode.ConfigureRequest, 
-      id_counter.get_id, 
+      duplex.get_ppp_id, 
       my_ip_list)
     
     send_packet(second_config_req)
@@ -826,7 +823,7 @@ class IpcpAutomaton(val duplex : AbstractDuplex,
     if(recent_sent_packet != null) {
       val retransmit_packet = new IpcpPacket(
         recent_sent_packet.code,
-        id_counter.get_id,  // a new id
+        duplex.get_ppp_id,  // a new id
         recent_sent_packet.ip_list)
       send_packet(retransmit_packet)
     }
@@ -843,11 +840,14 @@ class IpcpAutomaton(val duplex : AbstractDuplex,
 // =============================
 // IP protocol
 // =============================
+class IpData(val bytes : List[Byte]) extends FramePayload
+
 class IpDatagram(val identification : Int,
                  val source_ip_addr : List[Byte],
                  val destination_ip_addr : List[Byte],
-                 val data : List[Byte]) extends FramePayload {
-  val total_length = data.length + 20 // header length == 20
+                 val segment : UdpDatagram) {
+  val segment_bytes = segment.bytes(source_ip_addr, destination_ip_addr)
+  val total_length = segment_bytes.length + 20 // header length == 20
 
   // bytes without checksum ( checksum == 0 )
   private def get_holo_header_bytes : List[Byte] = {
@@ -864,9 +864,8 @@ class IpDatagram(val identification : Int,
   def bytes : List[Byte] = {
     val holo_header_bytes = get_holo_header_bytes
     val checksum = compute_checksum(holo_header_bytes)
-    val header_bytes = holo_header_bytes.patch(
-      10, split_word(checksum), 2)
-    header_bytes ++ data
+    val header_bytes = holo_header_bytes.patch(10, split_word(checksum), 2)
+    header_bytes ++ segment_bytes
   }
 }
 
@@ -875,19 +874,18 @@ object IpDatagram {
     (bytes.length >= 20) && compute_checksum(bytes.take(20)) == 0
   }
 
-  // Method parse() do not check validity of a list of bytes.  You
-  // should ensure it is valid by call is_header_checksum_good()
-  // first.
-  def parse(bytes : List[Byte]) : IpDatagram = {
-    val identification = byte_list_to_int(bytes.slice(4, 6))
-    val source_ip_addr = bytes.slice(12, 16)
-    val destination_ip_addr = bytes.slice(16, 20)
-    val data = bytes.drop(20)
+  // to be further unpacked in UdpDuplex
+  def parse(bytes : List[Byte]) : IpData = new IpData(bytes)
 
-    new IpDatagram(identification, 
-                   source_ip_addr, 
-                   destination_ip_addr,
-                   data)
+  def unpack(bytes : List[Byte]) : Either[String, List[Byte]] = {
+    if(is_header_checksum_good(bytes)) {
+      if(bytes(9) == 0x11)
+        Right(bytes.drop(20))
+      else
+        Left("Not UDP protocol")
+    }
+    else
+      Left("Corrupted")
   }
 }
 
@@ -918,6 +916,9 @@ class UdpDatagram(val source_port : Int,
     compute_checksum(pseudo_header ++ holo_bytes)
   }
 
+
+  // need ip addresses to compute checksum, because checksum takes a
+  // pseudo header into account.
   def bytes(source_ip_addr : List[Byte],
             destination_ip_addr : List[Byte]) : List[Byte] = {
     val checksum = compute_udp_checksum(source_ip_addr,
@@ -927,16 +928,13 @@ class UdpDatagram(val source_port : Int,
 }
 
 object UdpDatagram {
-  // Method parse() do not check validity of a list of bytes.  You
-  // should ensure it is valid by call is_header_checksum_good()
-  // first.
-  def parse(bytes : List[Byte]) : UdpDatagram = {
-    val source_port = byte_list_to_int(bytes.slice(0, 2))
-    val destination_port = byte_list_to_int(bytes.slice(2, 4))
-    val length = byte_list_to_int(bytes.slice(4, 6))
-    val data = bytes.take(length).drop(8)
-
-    new UdpDatagram(source_port, destination_port, data)
+  def unpack(bytes : List[Byte],
+             source_ip_addr : List[Byte],
+             destination_ip_addr : List[Byte]) : Either[String, List[Byte]] = {
+    if(is_checksum_good(bytes, source_ip_addr, destination_ip_addr))
+      Right(bytes.drop(8))
+    else
+      Left("Corrupted")
   }
 
   def is_checksum_good(bytes : List[Byte],
@@ -953,5 +951,179 @@ object UdpDatagram {
                          length : Int) : List[Byte] = {
     source_ip_addr ++ destination_ip_addr ++
     parse_hex("00 11") ++ split_word(length)  // protocol == 0x0011 == udp
+  }
+}
+
+class UdpDuplex(val ppp_duplex : AbstractDuplex,
+                val our_ip_addr : List[Byte],
+                val our_port : Int,
+                val remote_ip_addr : List[Byte],
+                val remote_port : Int) {
+  // IP id counter has 2 bytes, its initial value should be random
+  private var id_counter : Int = (math.random * 40000).toInt
+
+  def get_id : Int = {
+    id_counter += 1
+    id_counter
+  }
+
+  def write_udp(data : List[Byte]) : Unit = {
+    val udp_datagram = new UdpDatagram(our_port, remote_port, data)
+    val ip_datagram = 
+      new IpDatagram(get_id, our_ip_addr, wap_proxy_ip_addr, udp_datagram)
+    val ip_data = new IpData(ip_datagram.bytes)
+
+    ppp_duplex.write_ppp(new PppFrame(Protocol.IP, ip_data))
+  }
+
+  def read_udp(timeout_millis : Long) : Either[String, List[Byte]] = {
+    val frame = ppp_duplex.read_ppp(timeout_millis) 
+    if(frame.protocol == Protocol.Timeout)
+      Left("Timeout")
+    else if(frame.protocol != Protocol.IP)
+      Left("Not IP protocol")
+    else {
+      val ip_data = frame.payload.asInstanceOf[IpData].bytes
+      val data_inside_ip = IpDatagram.unpack(ip_data)
+      if(data_inside_ip.isLeft)
+        Left(data_inside_ip.left.get)
+      else 
+        UdpDatagram.unpack(data_inside_ip.right.get,
+                           our_ip_addr, remote_ip_addr)
+    }
+  }
+}
+
+
+// ==============================
+// WTP and WSP protocols
+// ==============================
+
+sealed abstract class PduType
+object PduType {
+  object Invoke extends PduType
+  object Result extends PduType
+  object SegmentedInvoke extends PduType
+  object Unknown extends PduType
+}
+
+class WtpHeader(val pdu_type : PduType,
+                val tid : Int,
+                val ttr : Boolean,
+                val transaction_class : Int,
+                val packet_sequence_number : Int) {
+  import WtpHeader._
+
+  private def bool_to_int(bool : Boolean) : Int = {
+    if(bool) 1 else 0
+  }
+
+  def bytes : List[Byte] = {
+    val pdu_type_int = pdu_type_values.map(_.swap).apply(pdu_type)
+    // other fields are zero and we are not concerned to it for now
+    val first_byte = ((pdu_type_int << 3) | (bool_to_int(ttr) << 1)).toByte
+    val last_byte = if(pdu_type == PduType.Invoke)
+      transaction_class.toByte
+    else if(pdu_type == PduType.SegmentedInvoke)
+      packet_sequence_number.toByte
+    else
+      throw new InvalidComposeException
+
+    first_byte +: split_word(tid) :+ last_byte      
+  }
+}
+
+object WtpHeader {
+  import PduType._
+  val pdu_type_values = Map[Int, PduType](0x01 -> Invoke,
+                                          0x02 -> Result,
+                                          0x05 -> SegmentedInvoke)
+
+  def get_pdu_type(bytes : List[Byte]) : PduType = {
+    val pdu_type_int = (bytes(0) & 0x78) >>> 3
+    pdu_type_values.getOrElse(pdu_type_int, Unknown)
+  }
+}
+
+class WspAutomaton(val duplex : UdpDuplex) {
+  import WspAutomaton._
+
+  private var transaction_id : Int = 0
+  // if due to bug, we did not record a session id, then 
+  // this default value is used in a closing request
+  private var session_id : List[Byte] = int_to_uintvar(100000)
+  
+  def get_tid : Int = {
+    transaction_id += 1
+    transaction_id
+  }
+
+  def connect : Unit = {
+    val tid = get_tid
+    var retransmit_counter = max_retransmit_times
+
+    val wtp_header = new WtpHeader(PduType.Invoke, get_tid, true, 2, 0)
+
+    val s_sdu_size_hex = 
+      0x81.toByte :: int_to_uintvar(wsp_server_sdu_size_capability)
+    val c_sdu_size_hex = 
+      0x80.toByte :: int_to_uintvar(wsp_client_sdu_size_capability)
+    val capabilities = 
+      ((c_sdu_size_hex.length.toByte :: c_sdu_size_hex) ++
+       (s_sdu_size_hex.length.toByte :: s_sdu_size_hex))        
+    val wsp_connect_pdu = 
+      (split_word(0x0110) ++ // pdutype=connect(0x01),version=1.0(0x10)
+       int_to_uintvar(capabilities.length) ++ // capabilities length
+       List(0x00.toByte) ++ // headers length
+       capabilities)
+
+    duplex.write_udp(wtp_header.bytes ++ wsp_connect_pdu)
+
+    val response = duplex.read_udp(request_timeout_interval)
+    println("[ " + to_hex_string(response.right.get) + " ]")
+    session_id = get_first_uintvar(response.right.get.drop(4))
+    println(WtpHeader.get_pdu_type(response.right.get))
+    println(to_hex_string(session_id))
+
+    duplex.write_udp(parse_hex("18") ++ split_word(tid))
+  }
+
+  def disconnect : Unit = {
+    val wtp_header = 0x0A.toByte +: split_word(get_tid) :+ 0x00.toByte
+    duplex.write_udp(wtp_header ++ parse_hex("05") ++ session_id)
+  }
+}
+
+
+object WspAutomaton {
+    // uintvar是wap系列协议中规定的，可变长的int值，字节的最高位为1表示
+  // uintvar串未结束，最高位为0表示是uintvar串的最后一个字节。
+  def get_first_uintvar(data : List[Byte]) : List[Byte] = {
+    val prefix = data.takeWhile( x => (x & 0x80) != 0 ) // 所有最高位为1的
+    prefix :+ data(prefix.length) // 第一个最高位为0的字节
+  }
+
+  // 根据wap系列系列协议规定，将数字进行8位转7位的转换，留出最高位作为
+  // “连续指示位”。
+  def int_to_uintvar(number : Int) : List[Byte] = {
+    def recur(num : Int, seq : List[Byte]) : List[Byte] = 
+      if(num == 0)
+        seq
+      else
+        recur(num >> 7, ((num & 0x7f) | 0x80).toByte :: seq)    
+
+    recur(number >> 7, List((number & 0x7f).toByte))
+  }
+
+  // 最高位是“连续指示位”，在这里可以忽略，因为get_first_uintvar已经确
+  // 定了uintvar在何处结束。
+  def uintvar_to_int(sequence : List[Byte]) : Int = {
+    def recur(num : Int, seq : List[Byte]) : Int = 
+      if(seq.isEmpty)
+        num
+      else
+        recur((num << 7) | (seq.head & 0x7f), seq.tail)
+
+    recur(0, sequence)
   }
 }

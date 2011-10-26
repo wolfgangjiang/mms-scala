@@ -22,17 +22,25 @@ abstract class RemoteSpec extends AbstractModemSpec {
         dpx => {
           duplex = dpx
           test_dial
-          val ppp_id_counter = new PppIdCounter(0x10)
-          val lcp_automaton = new LcpAutomaton(duplex, ppp_id_counter)
+          val lcp_automaton = new LcpAutomaton(duplex)
           lcp_automaton.state should be (LcpState.Closed)
           lcp_automaton.open
           lcp_automaton.state should be (LcpState.Ready)
-          val pap_automaton = new PapAutomaton(duplex, ppp_id_counter)
+          val pap_automaton = new PapAutomaton(duplex)
           pap_automaton.authenticate
-          val ipcp_automaton = new IpcpAutomaton(duplex, ppp_id_counter)
-          val ip_list : List[Byte] = ipcp_automaton.get_ip 
-          ip_list should have length (4)
-          println("My Ip Address: " + ip_to_string(ip_list))
+          val ipcp_automaton = new IpcpAutomaton(duplex)
+          val our_ip_addr : List[Byte] = ipcp_automaton.get_ip 
+          our_ip_addr should have length (4)
+          println("My Ip Address: " + ip_to_string(our_ip_addr))
+          val udp_duplex = new UdpDuplex(
+            duplex,
+            our_ip_addr, 
+            SessionParameters.our_port,
+            SessionParameters.wap_proxy_ip_addr, 
+            SessionParameters.wap_proxy_port)
+          val wsp_automaton = new WspAutomaton(udp_duplex)
+          wsp_automaton.connect
+          wsp_automaton.disconnect
           lcp_automaton.close
           lcp_automaton.state should be (LcpState.Closed)
         }
@@ -77,7 +85,9 @@ trait MockRemote extends AbstractRemote {
   }
 }
 
-class MockDuplex extends AbstractDuplex with ShouldMatchers{
+class MockDuplex 
+extends AbstractDuplex(SessionParameters.initial_ppp_id) 
+with ShouldMatchers{
   val AT_chat_map = Map("ATZ" -> "OK",
                         "AT+IPR?" -> "+IPR: 115200",
                         "ATD*99***1#" -> "CONNECT 115200\n ~")
