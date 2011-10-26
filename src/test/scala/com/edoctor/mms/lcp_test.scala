@@ -279,5 +279,25 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       }
     }
   }
+
+  describe("on incoming terminate request") {
+    it("sends a terminate ack and show it is closed by remote") {
+      val mock_duplex = new MockFrameDuplex
+      val terminate_req = new LcpPacket(
+        LcpCode.TerminateRequest, 0x99.toByte, Nil)
+      
+      mock_duplex.produce(new PppFrame(Protocol.LCP, terminate_req))
+      mock_duplex.check( frame => {
+        val packet = extract_lcp(frame)
+        packet.code should be (LcpCode.TerminateAck)
+        packet.identifier should be (0x99)
+      })
+
+      val id_counter = new PppIdCounter(0x50)
+      val automaton = new LcpAutomaton(mock_duplex, id_counter)
+      automaton.open
+      automaton.state should be (LcpState.ClosedByRemote)
+    }
+  }
 }
 
