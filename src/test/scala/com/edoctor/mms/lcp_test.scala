@@ -77,13 +77,6 @@ class LcpPacketSpecBasic extends Spec with ShouldMatchers {
 }
 
 
-// send correct req and ack on opening connection
-// send correct req and ack on closing connection
-// send correct retransmit package when timeout
-// throw correct exception when too many timeouts
-// respond correctly to terminate request
-// show correct state when asked whether is ready or other 
-
 class MockFrameDuplex extends AbstractDuplex
 with ShouldMatchers {
   def say_text(command : String) : Unit = { 
@@ -126,13 +119,20 @@ with ShouldMatchers {
 
   def check(block : PppFrame => Unit) : Unit = {
     val checker = new MockFrameExpectation { 
-      def check(frame : PppFrame) : Unit = block
+      def check(frame : PppFrame) : Unit = { block(frame) }
     }
     expectations = expectations :+ checker
   }
 }
 abstract class MockFrameExpectation { def check(frame : PppFrame) : Unit }
 
+//LcpAutomaton should:
+// send correct req and ack on opening connection
+// send correct req and ack on closing connection
+// send correct retransmit package when timeout
+// throw correct exception when too many timeouts
+// respond correctly to terminate request
+// show correct state when asked whether is ready or other 
 @RunWith(classOf[JUnitRunner])
 class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
   val default_timeout_frame = new PppFrame(
@@ -151,12 +151,12 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       mock_duplex.check(frame => {
         val packet = extract_lcp(frame)
         packet.code should be (LcpCode.ConfigureRequest)
-        packet.identifier should be (0x11)
+        packet.identifier should be (0x21)
         packet.data should be (
           SessionParameters.our_lcp_config_req_options)
       })        
 
-      val id_counter = new PppIdCounter(0x10)
+      val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       intercept[SessionTimeoutException] {
         automaton.open
@@ -181,7 +181,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
         packet.data should be (test_config_req_options)
       })
 
-      val id_counter = new PppIdCounter(0x10)
+      val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       intercept[SessionTimeoutException] {
         automaton.open
@@ -198,7 +198,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       mock_duplex.produce(new PppFrame(Protocol.LCP, config_req))
       mock_duplex.produce(new PppFrame(Protocol.LCP, config_ack))
 
-      val id_counter = new PppIdCounter(0x10)
+      val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.open
       automaton.state should be (LcpState.Ready)
@@ -214,7 +214,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       mock_duplex.produce(new PppFrame(Protocol.LCP, config_ack))
       mock_duplex.produce(new PppFrame(Protocol.LCP, config_req))
 
-      val id_counter = new PppIdCounter(0x10)
+      val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.open
       automaton.state should be (LcpState.Ready)
@@ -233,7 +233,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
         packet.code should be (LcpCode.TerminateRequest)
       })
 
-      val id_counter = new PppIdCounter(0x99)
+      val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.set_state(LcpState.Ready)
       automaton.close
@@ -252,18 +252,18 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       mock_duplex.produce(new PppFrame(Protocol.LCP, terminate_ack))
       mock_duplex.check( frame => {
         val packet = extract_lcp(frame)
-        packet.identifier should be (0x51)
+        packet.identifier should be (0x21)
       })
       mock_duplex.check( frame => {
         val packet = extract_lcp(frame)
-        packet.identifier should be (0x52)
+        packet.identifier should be (0x22)
       })
       mock_duplex.check( frame => {
         val packet = extract_lcp(frame)
-        packet.identifier should be (0x53)
+        packet.identifier should be (0x23)
       })
       
-      val id_counter = new PppIdCounter(0x50)
+      val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.set_state(LcpState.Ready)
       automaton.close
@@ -272,7 +272,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
     it("throws SessionTimeoutException when too many retransmits") {
       val mock_duplex = new MockFrameDuplex
     
-      val id_counter = new PppIdCounter(0x50)
+      val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       intercept[SessionTimeoutException] {
         automaton.open
@@ -287,13 +287,14 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
         LcpCode.TerminateRequest, 0x99.toByte, Nil)
       
       mock_duplex.produce(new PppFrame(Protocol.LCP, terminate_req))
+      mock_duplex.check( frame => { } ) // a dummy config request
       mock_duplex.check( frame => {
         val packet = extract_lcp(frame)
         packet.code should be (LcpCode.TerminateAck)
         packet.identifier should be (0x99)
       })
 
-      val id_counter = new PppIdCounter(0x50)
+      val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.open
       automaton.state should be (LcpState.ClosedByRemote)
@@ -301,3 +302,5 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
   }
 }
 
+// incoming terminate request should be handled by low level duplex
+// and throw an "ClosedByRemoteException" to indicate total failure.

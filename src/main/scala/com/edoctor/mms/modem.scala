@@ -323,8 +323,13 @@ class LcpAutomaton(val duplex : AbstractDuplex,
   }
   val retransmit_action = new LcpAction {
     def perform : Unit = {
-      if(recent_sent_packet != null)
-        send_packet(recent_sent_packet)
+      if(recent_sent_packet != null) {
+        val retransmit_packet = new LcpPacket(
+          recent_sent_packet.code,
+          id_counter.get_id,  // a new id
+          recent_sent_packet.data)
+        send_packet(retransmit_packet)
+      }
       retransmit_counter -= 1
       read_from_remote
     }
@@ -453,7 +458,9 @@ class LcpAutomaton(val duplex : AbstractDuplex,
 
   def send_config_request : Unit = {
     val packet = new LcpPacket(
-      LcpCode.ConfigureRequest, 0x11, our_lcp_config_req_options)
+      LcpCode.ConfigureRequest, 
+      id_counter.get_id, 
+      our_lcp_config_req_options)
 
     send_packet(packet)
   }
@@ -469,12 +476,14 @@ class LcpAutomaton(val duplex : AbstractDuplex,
 
   def send_terminate_req : Unit = {
     val packet = new LcpPacket(
-      LcpCode.TerminateRequest, 0x15, Nil)
+      LcpCode.TerminateRequest, id_counter.get_id, Nil)
 
     send_packet(packet)
   }
 
   def send_terminate_ack : Unit = {
+    val packet = new LcpPacket(
+      LcpCode.TerminateAck, recent_received_packet.identifier, Nil)
   }
 
   def send_packet(packet : LcpPacket) : Unit = {
