@@ -35,6 +35,7 @@ abstract class AbstractDuplex {
 
 // incoming terminate request should be handled by low level duplex
 // and throw an "ClosedByRemoteException" to indicate total failure.
+// this class is not covered by mocked unit tests
 class ActualDuplex(val in_s : java.io.InputStream,
                    val out_s : java.io.OutputStream) 
 extends AbstractDuplex {
@@ -88,8 +89,8 @@ extends AbstractDuplex {
         else if(data.isEmpty)
           read_with(data) // silently skip empty frame and continue read
         else {
-          // println("received: " + 
-          //         to_hex_string(decode_0x7d_escape(data.reverse)))
+          println("received: " + 
+                  to_hex_string(decode_0x7d_escape(data.reverse)))
           PppFrame.parse(data.reverse)
         }
       }        
@@ -101,8 +102,8 @@ extends AbstractDuplex {
   }
 
   def write_ppp(frame : PppFrame) : Unit = {
-    // println("sent: " + 
-    //         to_hex_string(decode_0x7d_escape(frame.bytes.init.tail)))
+    println("sent: " + 
+            to_hex_string(decode_0x7d_escape(frame.bytes.init.tail)))
     out_s.write(frame.bytes.toArray)
     out_s.flush
   }
@@ -127,6 +128,7 @@ extends AbstractDuplex {
 class SessionTimeoutException extends RuntimeException
 class InvalidComposeException extends RuntimeException
 class ClosedByRemoteException extends RuntimeException
+class AuthenticateFailureException extends RuntimeException
 
 case class PppFrame(protocol : Protocol,
                     payload : FramePayload) {
@@ -236,6 +238,7 @@ object PppFrame {
       val payload_data = raw_frame.drop(4).dropRight(2)
       val payload_packet = protocol match {
         case Protocol.LCP => LcpPacket.parse(payload_data)
+        case Protocol.PAP => PapPacket.parse(payload_data)
         case _ => new ErrorMessage("not implemented yet")
       }
       new PppFrame(protocol, payload_packet)
@@ -296,11 +299,11 @@ object LcpPacket {
 class LcpPacket(val code : LcpCode, 
                 val identifier : Byte, 
                 val data : List[Byte]) extends FramePayload {
-  def length : Int = data.length + 4
+  val length : Int = data.length + 4
   
   override def toString : String = {
     "LCP(" + code + 
-    "; id: " + to_hex_string(List(identifier)) + 
+    "; id: 0x" + to_hex_string(List(identifier)) + 
     "; data: " + to_hex_string(data) + ")"
   }
 
@@ -309,7 +312,7 @@ class LcpPacket(val code : LcpCode,
       throw new InvalidComposeException
     else {
       val code_byte = LcpPacket.code_names.map(_.swap).apply(code)
-      val length_bytes = split_word(data.length + 4)
+      val length_bytes = split_word(length)
       code_byte :: identifier :: length_bytes ++ data
     }
   }
@@ -498,10 +501,130 @@ class LcpAutomaton(val duplex : AbstractDuplex,
   def send_terminate_ack : Unit = {
     val packet = new LcpPacket(
       LcpCode.TerminateAck, recent_received_packet.identifier, Nil)
+
+    send_packet(packet)
   }
 
   def send_packet(packet : LcpPacket) : Unit = {
     the_recent_sent_packet = packet
     duplex.write_ppp(new PppFrame(Protocol.LCP, packet))
+  }
+}
+
+
+sealed abstract class PapCode
+object PapCode {
+  case object AuthenticateRequest extends PapCode
+  case object AuthenticateAck extends PapCode
+  case object AuthenticateNak extends PapCode
+  case object Unknown extends PapCode
+}
+
+object PapPacket {
+  import PapCode._
+  val code_names = Map[Byte, PapCode](1.toByte -> AuthenticateRequest,
+                                      2.toByte -> AuthenticateAck,
+                                      3.toByte -> AuthenticateNak)
+
+  private def get_code_name(code_byte : Byte) : PapCode = {
+    code_names.getOrElse(code_byte, Unknown)
+  }
+
+  def parse(raw_bytes : List[Byte]) : PapPacket = {
+    val code : PapCode = get_code_name(raw_bytes(0))
+    val identifier : Byte = raw_bytes(1)
+    val length : Int = byte_list_to_int(raw_bytes.slice(2,4))
+    val data : List[Byte] = raw_bytes.take(length).drop(4)
+    
+    new PapPacket(code, identifier, data)
+  }
+}
+
+class PapPacket(val code : PapCode,
+                val identifier : Byte,
+                val data : List[Byte]) extends FramePayload {
+  val length : Int = data.length + 4
+
+  override def toString : String = {
+    "PAP(" + code +
+    "; id: 0x" + to_hex_string(List(identifier)) +
+    "; data: " + to_hex_string(data) + ")"
+  }
+
+  def bytes : List[Byte] = {
+    if(code == PapCode.Unknown)
+      throw new InvalidComposeException
+    else {
+      val code_byte = PapPacket.code_names.map(_.swap).apply(code)
+      val length_bytes = split_word(length)
+      code_byte :: identifier :: length_bytes ++ data
+    }
+  }
+}
+
+class PapAutomaton(val duplex : AbstractDuplex,
+                   val id_counter : PppIdCounter) {
+  private var the_recent_sent_packet : PapPacket = null
+  def recent_sent_packet = the_recent_sent_packet
+  private var the_request_sent_time : Long = System.currentTimeMillis
+  def request_sent_time = the_request_sent_time
+  private var retransmit_counter = max_retransmit_times
+  
+  def timeout = {
+    (System.currentTimeMillis - request_sent_time > 
+     request_timeout_interval)
+  }
+    
+  def authenticate : Unit = {
+    val auth_req = new PapPacket(PapCode.AuthenticateRequest, 
+                                 id_counter.get_id, 
+                                 our_pap_auth_req_info)
+    send_packet(auth_req)
+    read_from_remote_and_process
+  }
+
+  def read_from_remote_and_process : Unit = {
+    val frame = duplex.read_ppp(request_timeout_interval)
+
+    // if there is a constant flow of irrelevent packets, 
+    // then we will not get a Protocol.Timeout, in such circumstances,
+    // we check timeout with our private timer.
+    if((frame.protocol != Protocol.PAP && timeout) ||
+       frame.protocol == Protocol.Timeout) {
+      if(retransmit_counter > 0)
+        retransmit   // soft timeout
+      else
+        throw new SessionTimeoutException  // hard timeout
+    }
+    else if(frame.protocol != Protocol.PAP) // and not timeout yet
+      read_from_remote_and_process // silently discard
+    else {
+      val packet = frame.payload.asInstanceOf[PapPacket]
+      if(packet.code == PapCode.AuthenticateAck) {
+        // success, return without incident
+      }
+      else if(packet.code == PapCode.AuthenticateNak)
+        throw new AuthenticateFailureException
+      else
+        read_from_remote_and_process // silently discard
+    }
+  }
+
+  def retransmit : Unit = {
+    if(recent_sent_packet != null) {
+      val retransmit_packet = new PapPacket(
+        recent_sent_packet.code,
+        id_counter.get_id,  // a new id
+        recent_sent_packet.data)
+      send_packet(retransmit_packet)
+    }
+    retransmit_counter -= 1
+    read_from_remote_and_process
+  }
+
+  def send_packet(packet : PapPacket) : Unit = {
+    the_recent_sent_packet = packet
+    the_request_sent_time = System.currentTimeMillis
+    duplex.write_ppp(new PppFrame(Protocol.PAP, packet))
   }
 }

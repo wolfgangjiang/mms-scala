@@ -33,6 +33,9 @@ class PppFrameSpecBasic extends Spec with ShouldMatchers {
 }
 
 class MockFrameDuplex extends AbstractDuplex with ShouldMatchers {
+  private var i_am_satisfied = false
+  def satisfied = (expectations.isEmpty || i_am_satisfied)
+
   def say_text(command : String) : Unit = { 
     fail("should not call say_text()")
   }
@@ -61,10 +64,13 @@ class MockFrameDuplex extends AbstractDuplex with ShouldMatchers {
   }
 
   override def write_ppp(frame : PppFrame) : Unit = {
-    if(write_count < expectations.length)
+    if(write_count < expectations.length) {
       expectations(write_count).check(frame)
+      write_count += 1
+      if(write_count == expectations.length)
+        i_am_satisfied = true
+    }
     // else do nothing
-    write_count += 1
   }
 
   def produce(frame : PppFrame) : Unit = {
@@ -88,7 +94,7 @@ class LcpPacketSpecBasic extends Spec with ShouldMatchers {
   val terminate_req = parse_hex("05 11 00 06 00 00")
 
   describe("LcpPacket object") {
-    it("can parse raw bytes in constructor") {
+    it("can parse raw bytes and return a packet object") {
       val packet = LcpPacket.parse(config_req)
       packet.code should be (LcpCode.ConfigureRequest)
       packet.identifier should be (1)
@@ -162,6 +168,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       intercept[SessionTimeoutException] {
         automaton.open
       }
+      mock_duplex should be ('satisfied)
     }
 
     it("sends a corresponding config-ack if receives a config-req") {
@@ -187,6 +194,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       intercept[SessionTimeoutException] {
         automaton.open
       }
+      mock_duplex should be ('satisfied)
     }
 
     it("gets ready when received a config-req and then a config-ack") {
@@ -203,6 +211,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.open
       automaton.state should be (LcpState.Ready)
+      mock_duplex should be ('satisfied)
     }
 
     it("gets ready when received a config-ack and then a config-req") {
@@ -219,6 +228,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.open
       automaton.state should be (LcpState.Ready)
+      mock_duplex should be ('satisfied)
     }
   }
 
@@ -239,6 +249,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       automaton.set_state(LcpState.Ready)
       automaton.close
       automaton.state should be (LcpState.Closed)
+      mock_duplex should be ('satisfied)
     }
   }
 
@@ -268,6 +279,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.set_state(LcpState.Ready)
       automaton.close
+      mock_duplex should be ('satisfied)
     }
   
     it("throws SessionTimeoutException when too many retransmits") {
@@ -278,6 +290,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       intercept[SessionTimeoutException] {
         automaton.open
       }
+      mock_duplex should be ('satisfied)
       id_counter.get_id should be (
         0x20 + SessionParameters.max_retransmit_times + 2)
       // "+2" is because there are two "get_id"s that are not retransmit
@@ -296,7 +309,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       mock_duplex.check( frame => {
         val packet = extract_lcp(frame)
         packet.code should be (LcpCode.TerminateAck)
-        packet.identifier should be (0x99)
+        packet.identifier should be (0x99.toByte)
       })
 
       val id_counter = new PppIdCounter(0x20)
@@ -304,15 +317,181 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       intercept[ClosedByRemoteException] {
         automaton.open
       }
+      mock_duplex should be ('satisfied)
+    }
+  }
+}
+
+//PapPacket should:
+// can parse raw bytes and return a packet object
+// convert to raw bytes
+// can label unknown code as PapCode.Unknown
+// can compose a packet
+// can compose a packet and get raw bytes
+@RunWith(classOf[JUnitRunner])
+class PapPacketSpecBasic extends Spec with ShouldMatchers {
+  val auth_req = parse_hex("01 23 00 06 00 00")
+  
+  describe("PapPacket object") {
+    it("can parse raw bytes and return a packet object") {
+      val packet = PapPacket.parse(auth_req)
+      packet.code should be (PapCode.AuthenticateRequest)
+      packet.identifier should be (0x23)
+      packet.length should be (auth_req.length)
+      packet.data should be (auth_req.drop(4))
+    }
+
+    it("can convert to raw bytes") {
+      val packet = PapPacket.parse(auth_req)
+      packet.bytes should be (auth_req)
+    }
+
+    it("can label unknown code as PapCode.Unknown") {
+      val packet = PapPacket.parse(0x55.toByte :: auth_req.tail)
+      packet.code should be (PapCode.Unknown)
+    }
+  }
+
+  describe("PapPacket class") {
+    it("can compose a packet") {
+      val packet = new PapPacket(
+        PapCode.AuthenticateRequest, 0x23.toByte, parse_hex("00 00"))
+      packet.code should be (PapCode.AuthenticateRequest)
+      packet.identifier should be (0x23)
+      packet.data should be (parse_hex("00 00"))
+    }
+
+    it("can compose a packet and get raw bytes") {
+      expect(auth_req) {
+        (new PapPacket(PapCode.AuthenticateRequest,
+                       0x23.toByte, 
+                       parse_hex("00 00"))).bytes
+      }
     }
   }
 }
 
 //PapAutomaton should:
 // send an Authenticate-Request when activated
-// signal success if received Authenticate-Ack
+// return without incident if received Authenticate-Ack
 // throw AuthenticateFailureException if received Authenticate-Nak
 // retransmit if timeout
-// deem it as timeout if only received unknown packets
+// deem it as timeout if only received unknown packets but not proper ack
 // throw SessionTimeoutException if too many timeouts
-// ignore other packets, silently discard them
+@RunWith(classOf[JUnitRunner])
+class PapAutomatonSpecBasic extends Spec with ShouldMatchers {
+  val auth_ack = {
+    val message = "Welcome!"
+    new PapPacket(
+      PapCode.AuthenticateAck, 
+      0x21.toByte, 
+      message.length.toByte :: message.getBytes.toList)
+  }
+
+  val auth_nak = {
+    val message = "Sorry! auth. failed"
+    new PapPacket(
+      PapCode.AuthenticateNak, 
+      0x21.toByte, 
+      message.length.toByte :: message.getBytes.toList)
+  }
+
+  private def extract_pap(frame : PppFrame) : PapPacket = {
+    frame.protocol should be (Protocol.PAP)
+    frame.payload.asInstanceOf[PapPacket]
+  }
+
+  it("send an Authenticate-Request when activated") {
+    val mock_duplex = new MockFrameDuplex
+
+    mock_duplex.check( frame => {
+      val packet = extract_pap(frame)
+      packet.code should be (PapCode.AuthenticateRequest)
+    })
+
+    val id_counter = new PppIdCounter(0x20)
+    val automaton = new PapAutomaton(mock_duplex, id_counter)
+    intercept[SessionTimeoutException] {
+      automaton.authenticate
+    }
+    mock_duplex should be ('satisfied)
+  }
+
+  it("returns without incident if received Authenticate-Ack") {
+    val mock_duplex = new MockFrameDuplex
+
+    mock_duplex.produce(new PppFrame(Protocol.PAP, auth_ack))
+
+    val id_counter = new PppIdCounter(0x20)
+    val automaton = new PapAutomaton(mock_duplex, id_counter)
+    automaton.authenticate
+    mock_duplex should be ('satisfied)
+  }
+
+
+  it("throws AuthenticateFailureException if received Authenticate-Nak") {
+    val mock_duplex = new MockFrameDuplex
+
+    mock_duplex.produce(new PppFrame(Protocol.PAP, auth_nak))
+
+    val id_counter = new PppIdCounter(0x20)
+    val automaton = new PapAutomaton(mock_duplex, id_counter)
+    intercept[AuthenticateFailureException] {
+      automaton.authenticate
+    }
+    mock_duplex should be ('satisfied)
+  }
+
+  it("retransmits if timeout") {
+    val mock_duplex = new MockFrameDuplex
+
+    mock_duplex.produce(mock_duplex.default_timeout_frame)
+    mock_duplex.produce(mock_duplex.default_timeout_frame)
+    mock_duplex.produce(new PppFrame(Protocol.PAP, auth_ack))
+    
+    mock_duplex.check( frame => {
+      val packet = extract_pap(frame)
+      packet.identifier should be (0x1F)
+    })
+    mock_duplex.check( frame => {
+      val packet = extract_pap(frame)
+      packet.identifier should be (0x20)
+    })
+    mock_duplex.check( frame => {
+      val packet = extract_pap(frame)
+      packet.identifier should be (0x21)
+    })
+
+    val id_counter = new PppIdCounter(0x1E)
+    val automaton = new PapAutomaton(mock_duplex, id_counter)
+    automaton.authenticate
+    mock_duplex should be ('satisfied)
+  }
+
+  it("throw SessionTimeoutException if too many timeouts") {
+    val mock_duplex = new MockFrameDuplex
+
+    val id_counter = new PppIdCounter(0x20)
+    val automaton = new PapAutomaton(mock_duplex, id_counter)
+    intercept[SessionTimeoutException] {
+      automaton.authenticate
+    }
+    mock_duplex should be ('satisfied)    
+  }
+
+  it("deem as timeout if only received unknown packets but not proper ack") {
+    val mock_duplex = new MockFrameDuplex
+
+    // irrelevant LCP packets
+    (1 to 4).foreach { _ =>
+      mock_duplex.produce(new PppFrame(Protocol.LCP, auth_ack)) 
+    }
+    
+    val id_counter = new PppIdCounter(0x1E)
+    val automaton = new PapAutomaton(mock_duplex, id_counter)
+    intercept[SessionTimeoutException] {
+      automaton.authenticate
+    }
+    mock_duplex should be ('satisfied)    
+  }
+}

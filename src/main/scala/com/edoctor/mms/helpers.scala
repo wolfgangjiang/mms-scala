@@ -79,4 +79,8 @@ object SessionParameters {
   val max_retransmit_times = 3
 
   val our_lcp_config_req_options = parse_hex("02 06 00 00 00 00")
+
+  val our_pap_auth_req_info = parse_hex("00 00")
+
+  val our_ipcp_initial_req_options = parse_hex("03 06 00 00 00 00")
 }
