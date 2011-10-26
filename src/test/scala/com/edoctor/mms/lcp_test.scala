@@ -32,8 +32,7 @@ class PppFrameSpecBasic extends Spec with ShouldMatchers {
   }
 }
 
-class MockFrameDuplex extends AbstractDuplex
-with ShouldMatchers {
+class MockFrameDuplex extends AbstractDuplex with ShouldMatchers {
   def say_text(command : String) : Unit = { 
     fail("should not call say_text()")
   }
@@ -246,7 +245,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
   describe("on timeout") {
     it("retransmits when timeout") {
       val terminate_ack = new LcpPacket(
-        LcpCode.TerminateAck, 0x53.toByte, Nil)
+        LcpCode.TerminateAck, 0x23.toByte, Nil)
       val mock_duplex = new MockFrameDuplex
 
       mock_duplex.produce(mock_duplex.default_timeout_frame)
@@ -293,7 +292,7 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
         LcpCode.TerminateRequest, 0x99.toByte, Nil)
       
       mock_duplex.produce(new PppFrame(Protocol.LCP, terminate_req))
-      mock_duplex.check( frame => { } ) // a dummy config request
+      mock_duplex.check( frame => { } ) // a dummy config-request
       mock_duplex.check( frame => {
         val packet = extract_lcp(frame)
         packet.code should be (LcpCode.TerminateAck)
@@ -309,5 +308,11 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
   }
 }
 
-// incoming terminate request should be handled by low level duplex
-// and throw an "ClosedByRemoteException" to indicate total failure.
+//PapAutomaton should:
+// send an Authenticate-Request when activated
+// signal success if received Authenticate-Ack
+// throw AuthenticateFailureException if received Authenticate-Nak
+// retransmit if timeout
+// deem it as timeout if only received unknown packets
+// throw SessionTimeoutException if too many timeouts
+// ignore other packets, silently discard them

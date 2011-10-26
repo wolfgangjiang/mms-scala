@@ -33,6 +33,8 @@ abstract class AbstractDuplex {
   def write_ppp(frame : PppFrame) : Unit
 }
 
+// incoming terminate request should be handled by low level duplex
+// and throw an "ClosedByRemoteException" to indicate total failure.
 class ActualDuplex(val in_s : java.io.InputStream,
                    val out_s : java.io.OutputStream) 
 extends AbstractDuplex {
