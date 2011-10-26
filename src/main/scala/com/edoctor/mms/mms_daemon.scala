@@ -209,11 +209,9 @@ object MmsDaemon {
 
   // 这里，p._1、p._2、p._3、p._4分别代表ip地址、udp端口、capacity和
   // is_enabled值，可参见write_conf函数。它必须与write_conf保持一致。
-  // sp端口也就是特服号端口的capacity和is_enabled是写死的，以后要改成可
-  // 配置的。当然，sp端口本身的逻辑难以在配置文件中表示。
+  // 现在我们不再支持sp端口。
   val ports : List[Port] = 
-    (port_config.map( p => new ModemPort(p._1, p._2, p._3, p._4) ) :+ 
-     new SPPort("Cosms SP        ", 1440, false, CosmsSPInfo.send_mms_method))
+    (port_config.map( p => new ModemPort(p._1, p._2, p._3, p._4) ))
 
     // 本函数仅仅在程序启动时运行一次，如果发现配置文件读取有错误，就会
     // 将程序结束，不会启动主循环。
