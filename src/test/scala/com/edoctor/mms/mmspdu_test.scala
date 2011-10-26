@@ -169,9 +169,25 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
     }
 
     it("composes a MmsRequest as bytes") {
-      // how to test?
-      // perhaps the appropriate way is to actually send mms
-      // and check manually 
+      class MockMmsRequest(override val title : String,
+                           override val to : String,
+                           override val parts : Array[MmsRequestPart])
+      extends MmsRequest
+
+      class MockMmsRequestPart(override val name : String,
+                               override val data_bytes : List[Byte])
+      extends MmsRequestPart
+
+      val part_0 = 
+        new MockMmsRequestPart("k.jpg", parse_hex("AB CD EF"))
+      val part_1 = 
+        new MockMmsRequestPart("m.smil", parse_hex("AB CD EF"))
+      val request = new MockMmsRequest(
+        "mock测试", "13122747605", Array(part_0, part_1))
+
+      val expected = parse_hex("8C 80 98 30 30 30 31 00 8D 91 89 1A 80 2B 38 36 31 35 30 30 30 32 37 39 34 34 35 2F 54 59 50 45 3D 50 4C 4D 4E 00 97 2B 38 36 31 33 31 32 32 37 34 37 36 30 35 2F 54 59 50 45 3D 50 4C 4D 4E 00 96 20 6D 6F 63 6B E6 B5 8B E8 AF 95 00 8A 80 8F 81 84 1F 21 B3 8A 3C 69 6E 64 65 78 2E 73 6D 69 6C 3E 00 89 61 70 70 6C 69 63 61 74 69 6F 6E 2F 73 6D 69 6C 00 02 10 03 08 9E 85 6B 2E 6A 70 67 00 8E 6B 2E 6A 70 67 00 AB CD EF 23 03 13 61 70 70 6C 69 63 61 74 69 6F 6E 2F 73 6D 69 6C 00 81 83 C0 22 3C 69 6E 64 65 78 2E 73 6D 69 6C 3E 00 AB CD EF")
+
+      MmsPdu.compose(request) should be (expected)
     }
   }
 
@@ -192,18 +208,44 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
     }
 
     it("parses json request") {
-      val json = ("{ title : \"m\", to : \"13012344321\", parts : " +
+      val json = (" { title : \"m\", to : \"13012344321\", parts : " +
+                  " [ {name : \"index.smil\", data_or_url : \"hey\" }, " +
+                  "   {name : \"m.jpg\", data_or_url : \"link_to_jpg\" }]" +
+                  "} ")
+      val either_obj = parse_request(json)
+      either_obj should be a ('right)
+      val obj = either_obj.right.get
+      obj.date should be (null)
+      obj.title should be ("m")
+      obj.to should be ("13012344321")
+      obj.parts.length should be (2)
+      obj.parts(0).name should be ("index.smil")
+      obj.parts(0).ext should be ("smil")
+      obj.parts(1).data_or_url should be ("link_to_jpg")      
+    }
+
+    it("parses well when date is specified") {
+      val json = (" { date: \"20110820\", " +
+                  "title : \"m\", to : \"13012344321\", parts : " +
                   " [ {name : \"index.smil\", data_or_url : \"hey\" }, " +
                   "   {name : \"m.jpg\", data_or_url : \"link_to_jpg\" }]" +
                   "}")
       val either_obj = parse_request(json)
       either_obj should be a ('right)
       val obj = either_obj.right.get
-      obj.title should be ("m")
+      obj.date should be ("20110820")
+    }
+
+    it("correctly parses old format request in ver1.0") {
+      val json = " [\"20110820\", \"13012344321\", \"标题\", \"内文\", \"pic_url.gif\", \"mid_url\"]"
+
+      val either_obj = parse_request(json)
+      either_obj should be a ('right)
+      val obj = either_obj.right.get
+      obj.date should be ("20110820")
       obj.to should be ("13012344321")
-      obj.parts.length should be (2)
-      obj.parts(0).name should be ("index.smil")
-      obj.parts(1).data_or_url should be ("link_to_jpg")      
+      obj.parts.length should be (4)
+      obj.parts.last.name should be ("index.smil")
     }
 
     it("rejects malformed mobile number") {
@@ -247,6 +289,74 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
       either_obj should be a ('right)
       val obj = either_obj.right.get
       obj.parts(0).data_bytes.length should be (0)
+    }
+
+    describe("VersionUpgrader") {
+      import MmsPdu.VersionUpgrader._
+
+      def json_xml_escape(str : String) : String = 
+        str.replace("=", "\\u003d").replace("<", "\\u003c").replace(">", "\\u003e")
+
+      val typical_old_json = "[\"20110820\", \"13012344321\", \"标题\", \"内文\", \"pic_url.gif\", \"mid_url\"]"
+      val typical_new_json = json_xml_escape(
+        "{\"date\":\"20110820\",\"title\":\"标题\"," +
+        "\"to\":\"13012344321\",\"parts\":[" +
+        "{\"name\":\"k.gif\",\"data_or_url\":\"pic_url.gif\"}," +
+        "{\"name\":\"k.txt\",\"data_or_url\":\"内文\"}," +
+        "{\"name\":\"k.mid\",\"data_or_url\":\"mid_url\"}," +
+        "{\"name\":\"index.smil\",\"data_or_url\":\"<smil><body><img src=\\\"k.gif\\\" /><text src=\\\"k.txt\\\" /><audio src=\\\"k.mid\\\" repeatCount=\\\"indefinite\\\" type=\\\"mid\\\" /></body></smil>\"}]}")
+
+      it("transforms a 1.0 request to a 2.0 request") {
+        val old_json = typical_old_json
+        val new_json = typical_new_json
+        upgrade_request_from_1_0(old_json) should be (new_json)
+      }
+
+      it("recognizes different pic url extension names") {
+        val old_json = typical_old_json.replace("gif", "jpg")
+        val new_json = typical_new_json.replace("gif", "jpg")
+        upgrade_request_from_1_0(old_json) should be (new_json)
+      }
+
+      it("treats null url as non-request") {
+        val old_json = typical_old_json.replace("\"mid_url\"", "null")
+        val new_json = typical_new_json.
+        replace("{\"name\":\"k.mid\",\"data_or_url\":\"mid_url\"},", "").
+        replace(json_xml_escape("<audio src=\\\"k.mid\\\" repeatCount=\\\"indefinite\\\" type=\\\"mid\\\" />"), "")          
+
+        upgrade_request_from_1_0(old_json) should be (new_json)
+      }
+
+      it("treats empty url as non-request") {
+        val old_json = typical_old_json.replace("\"pic_url.gif\"", "\"\"")
+        val new_json = typical_new_json.
+        replace("{\"name\":\"k.gif\",\"data_or_url\":\"pic_url.gif\"},", "").
+        replace(json_xml_escape("<img src=\\\"k.gif\\\" />"), "")
+
+        upgrade_request_from_1_0(old_json) should be (new_json)
+      }
+
+      it("results in 2.0 MmsRequest object") {
+        val either_request = 
+          MmsPdu.parse_request(upgrade_request_from_1_0(typical_old_json))
+        either_request should be a ('right)
+        val request = either_request.right.get
+        request.date should be ("20110820")
+        request.title should be ("标题")
+        request.parts.length should be (4)
+        request.parts.head.name should be ("k.gif")
+        request.parts.head.data_or_url should be ("pic_url.gif")
+        request.parts.last.name should be ("index.smil")
+      }
+
+      it("treats \"none\" date as null") {
+        val old_json = typical_old_json.replace("20110820", "none")
+        val either_request = 
+          MmsPdu.parse_request(upgrade_request_from_1_0(old_json))
+        either_request should be a ('right)
+        val request = either_request.right.get
+        request.date should be (null)
+      }
     }
   }  
 }

@@ -3,15 +3,22 @@ package com.edoctor.mms
 import SessionHelpers._
 import SessionParameters._
 import Wsp.int_to_uintvar
+import com.google.gson.{ Gson, JsonParseException }
 
 object MmsPdu {
+  val the_gson = new Gson
+
   sealed abstract class MessageType
   object MessageType {
     object M_send_req extends MessageType
   }
 
   def parse_request(json_request : String) : Either[String, MmsRequest] = {
-    import com.google.gson.{ Gson, JsonParseException }
+    val json_request_2_0 = if(json_request.trim.startsWith("{"))
+      json_request
+    else
+      VersionUpgrader.upgrade_request_from_1_0(json_request)
+
     def check_parts(request_obj : MmsRequest) : Either[String, MmsRequest] = {
       request_obj.parts.foreach(part => {
         if(part.name == null) return Left("missing part name")
@@ -23,7 +30,7 @@ object MmsPdu {
 
     try {
       val request_obj = 
-        (new Gson).fromJson(json_request, classOf[MmsRequest])
+        the_gson.fromJson(json_request_2_0, classOf[MmsRequest])
       if(request_obj.title == null) Left("missing title")
       else if(request_obj.to == null) Left("missing destination")
       else if(!(request_obj.to matches """\d{4,}""")) Left("malformed mobile number")
@@ -61,8 +68,10 @@ object MmsPdu {
     val first_byte = 0x89.toByte
     // 0x89 == 0x80 + 0x09 == From
     val length_byte = (mobile.length + 2).toByte
+    // +2 means the first byte and the length byte
     val third_byte = 0x80.toByte 
     // this third byte is only require for sender, but not receiver
+    // it is the so-called "Address-Presentation-Token"
     List[Byte](first_byte, length_byte, third_byte) ++
     encode_zero_terminate_string(mobile)
   }
@@ -264,6 +273,80 @@ object MmsPdu {
          part_count_byte,
          part_bytes).flatten
   }
+
+  object VersionUpgrader {
+    val smil_header = "<smil><body>"
+    val smil_footer = "</body></smil>"
+    val img_tag = "<img src=\"k.EXT\" />"
+    val text_tag = "<text src=\"k.txt\" />"
+    val mid_tag = "<audio src=\"k.mid\" repeatCount=\"indefinite\" type=\"mid\" />"
+
+    def is_blank(str : String) : Boolean = (str == null) || (str == "")
+
+    def with_guard(str : String, default_value : String) : String = 
+      if(is_blank(str)) default_value else str
+
+    def get_ext(pic_url : String) : String = {
+      if(pic_url.endsWith(".jpg")) "jpg"
+      else if(pic_url.endsWith(".jpeg")) "jpg"
+      else if(pic_url.endsWith(".gif")) "gif"
+      else if(pic_url.endsWith(".png")) "png"
+      else "gif"  // default rescue, can work properly in many circumstances
+    }
+
+    def upgrade_request_from_1_0(old_json : String) : String = {
+      // old request should be an array of strings, formatted like
+      // [date, target, subject, text, pic_url, mid_url]
+      // last three of them may be blank string or null
+      try {
+        val old_request : Array[String] = 
+          the_gson.fromJson(old_json, classOf[Array[String]])
+        val date = if(old_request(0) == "none") null
+                   else with_guard(old_request(0), null)
+        val target = with_guard(old_request(1), null)
+        val subject = with_guard(old_request(2), null)
+        val text = with_guard(old_request(3), null)
+        val pic_url = with_guard(old_request(4), null)
+        val mid_url = with_guard(old_request(5), null)
+        make_2_0_request(date, target, subject, text, pic_url, mid_url)
+      } catch {
+        case e : JsonParseException => "{" 
+        // this should fail parse in later json parsing
+      }
+    }
+
+    def make_2_0_request(date : String,
+                         target : String,
+                         subject : String,
+                         text : String,
+                         pic_url : String,
+                         mid_url : String) : String = {
+      val parts = 
+        scala.collection.mutable.ArrayBuffer[MmsRequestPart]()        
+      var smil_content : String = ""
+      
+      if(!is_blank(pic_url)) {
+        val ext = get_ext(pic_url)
+        parts += new SpecifiableMmsRequestPart("k." + ext, pic_url)
+        smil_content += img_tag.replace("EXT", ext)
+      }
+      if(!is_blank(text)) {
+        parts += new SpecifiableMmsRequestPart("k.txt", text)
+        smil_content += text_tag
+      }
+      if(!is_blank(mid_url)) {
+        parts += new SpecifiableMmsRequestPart("k.mid", mid_url)
+        smil_content += mid_tag
+      }
+      val smil = smil_header + smil_content + smil_footer
+      parts += new SpecifiableMmsRequestPart("index.smil", smil)
+
+      val request = new SpecifiableMmsRequest(
+        date, subject, target, parts.toArray)
+
+      the_gson.toJson(request)
+    }
+  }
 }
 
 class MmsRequestPart {
@@ -329,10 +412,22 @@ class MmsRequestPart {
 }
 
 class MmsRequest {
+  val date : String = null
   val title : String = null
   val to : String = null
   val parts : Array[MmsRequestPart] = null
 }
+
+class SpecifiableMmsRequest(override val date : String,
+                            override val title : String,
+                            override val to : String,
+                            override val parts : Array[MmsRequestPart])
+extends MmsRequest
+
+class SpecifiableMmsRequestPart(override val name : String,
+                                override val data_or_url : String)
+extends MmsRequestPart
+
 
 object App extends ActualRemote {
   import SessionHelpers._
