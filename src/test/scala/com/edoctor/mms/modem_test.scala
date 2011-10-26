@@ -10,7 +10,7 @@ import SessionHelpers._
 abstract class AbstractModemSpec extends Spec
 with ShouldMatchers with AbstractRemote
 
-abstract class RemoteSanitySpec extends AbstractModemSpec {
+abstract class RemoteSpec extends AbstractModemSpec {
   private var duplex : AbstractDuplex = null
   private var the_recent_frame : PppFrame = null
   
@@ -30,7 +30,9 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
           val pap_automaton = new PapAutomaton(duplex, ppp_id_counter)
           pap_automaton.authenticate
           val ipcp_automaton = new IpcpAutomaton(duplex, ppp_id_counter)
-          ipcp_automaton.get_ip should have length (4)
+          val ip_list : List[Byte] = ipcp_automaton.get_ip 
+          ip_list should have length (4)
+          println("My Ip Address: " + ip_to_string(ip_list))
           lcp_automaton.close
           lcp_automaton.state should be (LcpState.Closed)
         }
@@ -61,10 +63,10 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
 }
 
 @RunWith(classOf[JUnitRunner])
-class RemoteSanitySpecWithActual extends RemoteSanitySpec with ActualRemote
+class RemoteSpecWithActual extends RemoteSpec with ActualRemote
 
 @RunWith(classOf[JUnitRunner])
-class RemoteSanitySpecWithMock extends RemoteSanitySpec with MockRemote
+class RemoteSpecWithMock extends RemoteSpec with MockRemote
 
 
 

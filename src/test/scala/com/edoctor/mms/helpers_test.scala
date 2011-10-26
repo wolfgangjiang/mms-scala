@@ -84,4 +84,16 @@ class HelpersSpecBasic extends Spec with ShouldMatchers {
       }
     }
   }
+
+  describe("compute_checksum") {
+    it("computes a checksum from some data that without checksum") {
+      val bytes = parse_hex("45 00 00 6c 92 cc 00 00 38 06 00 00 92 95 ba 14 a9 7c 15 95")
+      compute_checksum(bytes) should be (0xe404)
+    }
+
+    it("computes a zero from some data that is already with checksum") {
+      val bytes = parse_hex("45 00 00 6c 92 cc 00 00 38 06 e4 04 92 95 ba 14 a9 7c 15 95")
+      compute_checksum(bytes) should be (0)
+    }
+  }
 }

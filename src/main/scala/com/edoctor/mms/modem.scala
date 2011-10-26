@@ -3,6 +3,10 @@ package com.edoctor.mms
 import SessionHelpers._
 import SessionParameters._
 
+// =============================
+// telnet connection and duplex
+// =============================
+
 trait AbstractRemote {
   def with_telnet_connection(modem_ip : String, modem_port : Int) 
     (block : AbstractDuplex => Unit) : Unit
@@ -131,6 +135,10 @@ class ClosedByRemoteException extends RuntimeException
 class AuthenticateFailureException extends RuntimeException
 class MalformedIpAddressException extends RuntimeException
 
+// =============================
+// PPP protocol
+// =============================
+
 case class PppFrame(protocol : Protocol,
                     payload : FramePayload) {
   def bytes : List[Byte] = {
@@ -258,6 +266,10 @@ class PppIdCounter(initial : Int) {
   }
 }
 
+// =============================
+// LCP protocol
+// =============================
+
 sealed abstract class LcpCode
 object LcpCode {
   case object ConfigureRequest extends LcpCode
@@ -320,6 +332,15 @@ class LcpPacket(val code : LcpCode,
   }
 }
 
+// LCP建立连接，协议的规定是，双方对等，都主动向对方发送config
+// request，在接收到config request时，发送一个id相同的config ack，当
+// 双方都收到config ack，就是连接建立成功。如果没有收到config ack，就
+// 重传config request，直到超出重传次数限制。如果对方的options中有些
+// 我们不能接受，我们还可以发送config nak去回绝它，但是发送彩信时我们
+// 遇到的对方options都可以接受。
+// LCP结束连接。按照协议规定，任何一方可以单方面发起结束连接，发送
+// terminate request，对方应回复terminate ack。如果成功收到terminate
+// ack，连接成功结束，否则重传。
 class LcpAutomaton(val duplex : AbstractDuplex, 
                    val id_counter : PppIdCounter) {
   import LcpState._
@@ -514,6 +535,11 @@ class LcpAutomaton(val duplex : AbstractDuplex,
 }
 
 
+// =============================
+// PAP protocol
+// =============================
+
+
 sealed abstract class PapCode
 object PapCode {
   case object AuthenticateRequest extends PapCode
@@ -564,6 +590,8 @@ class PapPacket(val code : PapCode,
   }
 }
 
+// 彩信网关（代理？）的连接不需要用户名和密码，pap的用户名和密码都设置
+// 为单字节"00"。只要得到了auth ack就成功。
 class PapAutomaton(val duplex : AbstractDuplex,
                    val id_counter : PppIdCounter) {
   private var the_recent_sent_packet : PapPacket = null
@@ -631,6 +659,11 @@ class PapAutomaton(val duplex : AbstractDuplex,
   }
 }
 
+// =============================
+// IPCP protocol
+// =============================
+
+
 sealed abstract class IpcpCode
 object IpcpCode {
   case object ConfigureRequest extends IpcpCode
@@ -691,6 +724,18 @@ class IpcpPacket(val code : IpcpCode,
   }
 }
 
+// IPCP协议交互的任务是获得一个对方分配的IP地址。过程是这样的：(1)我
+// 们发送一个config req，请求ip地址0.0.0.0，同时对方主动发给我们一个
+// config req，声明它自己的ip地址，在我们在翼多的调试中总是
+// 192.168.111.111。这个对方的ip地址是无线路由器的ip地址，因为现在我
+// 们还在ppp阶段，只是一个local network，没有ip地址，是不能够穿过路由
+// 器到达外面广大的internetwork中的。(2)我们认可对方的ip，发送一个
+// 192.168.111.111的config ack给它。同时，对方驳回我们的请求，发给我
+// 们一个config nak，毕竟0.0.0.0是不可能分配给我们的。在config
+// nak中，会包含一个对方建议我们采用（分配给我们）的ip，是随机的，在
+// 我们国内一般都是10.*.*.*。(3)我们用它给我们的ip地址来再次申请，发
+// 送config req，它让我们申请哪个，我们就申请哪个。这样，它就会返回
+// config ack，认可我们的申请。然后，我们就可以开始使用这个ip地址了。
 class IpcpAutomaton(val duplex : AbstractDuplex,
                     val id_counter : PppIdCounter) {
   private var recent_sent_packet : IpcpPacket = null
@@ -727,7 +772,7 @@ class IpcpAutomaton(val duplex : AbstractDuplex,
       else
         throw new SessionTimeoutException  // hard timeout      
     } 
-    else if(frame.protocol != Protocol.IPCP) 
+    else if(frame.protocol != Protocol.IPCP)  // but not timeout
       read_from_remote_and_process      // silently discard
     else {
       val packet = frame.payload.asInstanceOf[IpcpPacket]
@@ -792,5 +837,56 @@ class IpcpAutomaton(val duplex : AbstractDuplex,
     recent_sent_time = System.currentTimeMillis
     recent_sent_packet = packet
     duplex.write_ppp(new PppFrame(Protocol.IPCP, packet))    
+  }
+}
+
+// =============================
+// IP protocol
+// =============================
+class IpDatagram(val identification : Int,
+                 val source_ip_addr : List[Byte],
+                 val destination_ip_addr : List[Byte],
+                 val data : List[Byte]) extends FramePayload {
+  val total_length = data.length + 20 // header length == 20
+
+  // bytes without checksum ( checksum == 0 )
+  private def get_holo_header_bytes : List[Byte] = {
+    parse_hex("45 00") ++ // version, header len, "type of service"
+    split_word(total_length) ++  // total length
+    split_word(identification) ++ 
+    split_word(0) ++ // we won't make fragments
+    List(default_ip_ttl, 0x11.toByte) ++ // ttl, protocol = udp = 0x11
+    split_word(0) ++ // dummy checksum to be filled in later
+    source_ip_addr ++ 
+    destination_ip_addr
+  }
+
+  def bytes : List[Byte] = {
+    val holo_header_bytes = get_holo_header_bytes
+    val checksum = compute_checksum(holo_header_bytes)
+    val header_bytes = holo_header_bytes.patch(
+      10, split_word(checksum), 2)
+    header_bytes ++ data
+  }
+}
+
+object IpDatagram {
+  def is_header_checksum_good(bytes : List[Byte]) : Boolean = {
+    (bytes.length >= 20) && compute_checksum(bytes.take(20)) == 0
+  }
+
+  // Method parse() do not check validity of a list of bytes.  You
+  // should ensure it is valid by call is_header_checksum_good()
+  // first.
+  def parse(bytes : List[Byte]) : IpDatagram = {
+    val identification = byte_list_to_int(bytes.slice(4, 6))
+    val source_ip_addr = bytes.slice(12, 16)
+    val destination_ip_addr = bytes.slice(16, 20)
+    val data = bytes.drop(20)
+
+    new IpDatagram(identification, 
+                   source_ip_addr, 
+                   destination_ip_addr,
+                   data)
   }
 }

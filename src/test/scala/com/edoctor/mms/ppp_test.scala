@@ -401,7 +401,7 @@ class PapAutomatonSpecBasic extends Spec with ShouldMatchers {
     frame.payload.asInstanceOf[PapPacket]
   }
 
-  it("send an Authenticate-Request when activated") {
+  it("sends an Authenticate-Request when activated") {
     val mock_duplex = new MockFrameDuplex
 
     mock_duplex.check( frame => {
@@ -468,7 +468,7 @@ class PapAutomatonSpecBasic extends Spec with ShouldMatchers {
     mock_duplex should be ('satisfied)
   }
 
-  it("throw SessionTimeoutException if too many timeouts") {
+  it("throws SessionTimeoutException if too many timeouts") {
     val mock_duplex = new MockFrameDuplex
 
     val id_counter = new PppIdCounter(0x20)
@@ -479,7 +479,7 @@ class PapAutomatonSpecBasic extends Spec with ShouldMatchers {
     mock_duplex should be ('satisfied)    
   }
 
-  it("deem as timeout if only received unknown packets but not proper ack") {
+  it("deems as timeout if only received unknown packets but not proper ack") {
     val mock_duplex = new MockFrameDuplex
 
     // irrelevant LCP packets

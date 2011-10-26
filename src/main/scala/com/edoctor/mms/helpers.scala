@@ -80,6 +80,27 @@ object SessionHelpers {
     assert(ip_list.length == 4)
     ip_list.map(x => (x.toInt & 0xFF)).mkString(".")
   }
+
+
+  // 这个校验和不是循环冗余，而是ip、tcp、udp所使用的奇偶校验和。这段代
+  // 码差不多是从网上的相关既有代码中改写来的。
+  def compute_checksum(data : List[Byte]) : Int = {
+    def get_head_num(data : List[Byte]) : Int = 
+      if(data.length == 1)
+        (data.head & 0xFF) << 8
+      else
+        ((data.head & 0xFF) << 8) + (data.tail.head & 0xFF)
+
+    def recur(number : Int, data : List[Byte]) : Int = 
+      if(data.isEmpty)
+        number
+      else {
+        val simpleSum = number + get_head_num(data)
+        recur((simpleSum >> 16) + (simpleSum & 0xFFFF), data.drop(2))
+      }
+    
+    (~recur(get_head_num(data), data.drop(2)) & 0xFFFF) // bits inversed
+  }
 }
 import SessionHelpers._
 
@@ -97,4 +118,23 @@ object SessionParameters {
   val our_lcp_config_req_options = parse_hex("02 06 00 00 00 00")
 
   val our_pap_auth_req_info = parse_hex("00 00")
+
+  val wap_proxy_ip_addr = "10.0.0.172"
+  val wap_proxy_port = 9201
+  val our_port = 2048
+  // 我们的ip地址是动态获取的
+
+  val default_ip_ttl = 0xFF.toByte // time to live of ip datagram sent
+
+  // 以下两个sdu size capability应大于一条彩信的最大长度，即应大于50k。
+  // sdu是service data unit的缩写，在wsp中不分组，所以可以设得很大。在
+  // wtp中才分组。sdu基本上是wsp里的payload的概念，一个sdu中包含一个完
+  // 整的短信。
+  val wsp_client_sdu_size_capability = 60 * 1024 // 接收彩信用
+  val wsp_server_sdu_size_capability = 100 * 1024 // 发送彩信用
+  // 把wtp分组设得较小，就可以避免ip协议中的进一步分组。
+  // 若ip包的长度小于576就一定不会被进一步分组了。
+  val wtp_max_transmit_unit_size = 400 // wtp分组时一组最大长度
+
+  val mmsc_url = "http://mmsc.monternet.com"
 }
