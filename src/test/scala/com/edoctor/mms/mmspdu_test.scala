@@ -108,7 +108,7 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
 
   describe("MmsPdu part encoders") {
     import MmsPdu._
-    it("encodes text/plain in utf-8") {
+    it("encodes text/plain in utf-8 with its name") {
       expect(parse_hex("0B 0D 03 83 81 EA 8E 6B 2E 74 78 74 00 20 E6 B5 8B E8 AF 95 E6 96 87 E6 9C AC")) {
         encode_part_text("测试文本".getBytes.toList, "k.txt")
       }
@@ -153,6 +153,18 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
       part_png.takeRight(png_pic.length) should be (png_pic)
       expect(parse_hex("10 82 1C 08 A0 85 6B 2E 70 6E 67 00 8E 6B 2E 70 6E 67 00")) {
         part_png.dropRight(png_pic.length)
+      }
+    }
+
+    it("encodes audio/mid with its name") {
+      val mid = load_test_asset("requiem.mid")
+      mid.take(8) should be (parse_hex("4d 54 68 64 00 00 00 06"))
+      mid.length should be (12001)
+
+      val part_mid = encode_part_midi(mid, "k.mid")
+      part_mid.takeRight(mid.length) should be (mid)
+      expect(parse_hex("19 DD 61 11 61 75 64 69 6F 2F 6D 69 64 00 85 6B 2E 6D 69 64 00 8E 6B 2E 6D 69 64 00")) {
+        part_mid.dropRight(mid.length)
       }
     }
 

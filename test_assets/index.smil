@@ -7,6 +7,10 @@
     </layout>
   </head>
   <body>
+    <!-- <par> -->
+    <!--   <audio src="k.mid" repeatCount="indefinite" type="mid" /> -->
+    <!--   <text src="k1.txt" region="Up" /> -->
+    <!-- </par> -->
     <par dur="6s">
       <text src="k1.txt" region="Up" />
       <img src="k.gif" region="Down" />

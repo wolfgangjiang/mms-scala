@@ -207,6 +207,27 @@ object MmsPdu {
     // 0xA0 == 0x80 + 0x20 == "image/png"
   }
 
+  def encode_part_midi(data : List[Byte], name : String) : List[Byte] = {
+    val content_type_string = encode_zero_terminate_string("audio/mid")
+    val name_parameter = 0x85.toByte :: encode_zero_terminate_string(name)
+    // 0x85 == 0x80 + 0x05 == name (wellknown parameter)
+    val content_type_length_byte = 
+      (content_type_string.length + name_parameter.length).toByte
+    val path_header = 0x8E.toByte :: encode_zero_terminate_string(name)
+    // 0x8E == 0x80 + 0x0E == Content-Location
+    val header = (content_type_length_byte ::
+                  content_type_string ++
+                  name_parameter ++
+                  path_header)
+    val headers_len = int_to_uintvar(header.length)
+    val data_len = int_to_uintvar(data.length)
+    
+    List(headers_len,
+         data_len,
+         header,
+         data).flatten
+  }
+
   def encode_pdu_header(title : String, to : String) : List[Byte] = {
     List(encode_message_type(MessageType.M_send_req),
          encode_transaction_id("0001"),
@@ -226,6 +247,8 @@ object MmsPdu {
       encode_part_gif(part.data_bytes, part.name)
     else if(part.ext == "png")
       encode_part_png(part.data_bytes, part.name)
+    else if(part.ext == "mid" || part.ext == "midi")
+      encode_part_midi(part.data_bytes, part.name)
     else if(part.ext == "smil")
       encode_part_smil(part.data_bytes)
     else
@@ -346,11 +369,8 @@ object App extends ActualRemote {
       dstream.readFully(byte_array)
       byte_array.toList
     }
-    val new_receiver = 0x97.toByte +: "13122747605".getBytes.toList :+ 0.toByte
     val header = parse_hex("8C 80 98 30 30 30 31 00 8D 81 89 11 80 2B 38 36 31 35 30 30 30 30 32 37 39 34 34 35 00 97 2B 38 36 31 33 31 32 32 37 34 37 36 30 35 2F 54 59 50 45 3D 50 4C 4D 4E 00 96 20 E5 BD A9 E4 BF A1 E6 B5 8B E8 AF 95 00 8A 80 8F 80")
     val result = header ++ get_from_file("../example_mmspdu.mms").drop(116)
-    println(to_hex_string(result.slice(32, 59)))
-    // sys.exit(0)
     result
   }
 
@@ -386,3 +406,7 @@ object App extends ActualRemote {
     }
   }
 }
+
+// http://www.midishrine.com/ostepop/anime/Nausicaa/requiem.mid
+// http://page.freett.com/kimidi/midi/nausicaa.mid
+// http://simplythebest.net/sounds/Midi/Midi_files/music_Midi_files/chachacha.mid
