@@ -65,9 +65,18 @@ object SessionHelpers {
     recur(list, 0)
   }  
 }
+import SessionHelpers._
 
 object SessionParameters {
   // 每隔burst_read_interval读取一次远端数据，而不是一直空循环等待，这
   // 是为了省出cpu时间
   val burst_read_interval = 10L
+
+  // request_timeout仅用于config-request和terminal-request的应答超时判
+  // 定，以毫秒为单位。
+  val request_timeout_interval : Long = 15*1000L 
+
+  val max_retransmit_times = 3
+
+  val our_lcp_config_req_options = parse_hex("02 06 00 00 00 00")
 }

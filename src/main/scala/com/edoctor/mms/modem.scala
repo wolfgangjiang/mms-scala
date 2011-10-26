@@ -29,7 +29,8 @@ trait ActualRemote extends AbstractRemote {
 abstract class AbstractDuplex {
   def say_text(command : String) : Unit
   def listen_text(timeout_millis : Long) : String
-  def read_binary(timeout_millis : Long) : List[Byte]
+  def read_ppp(timeout_millis : Long) : PppFrame
+  def write_ppp(frame : PppFrame) : Unit
 }
 
 class ActualDuplex(val in_s : java.io.InputStream,
@@ -48,7 +49,7 @@ extends AbstractDuplex {
     def listen_with(data : String) : String = {
       Thread.sleep(burst_read_interval)
       if(System.currentTimeMillis - start_time > timeout_millis)
-        data                            // read immediately
+        data                            // return immediately
       else if(in_s.available == 0)
         listen_with(data)               // continue wait to read
       else {
@@ -63,12 +64,17 @@ extends AbstractDuplex {
     listen_with("").trim
   }
 
-  def read_binary(timeout_millis : Long) : List[Byte] = {
+  // 阻塞读取，直到读到一个完整的、非空的ppp frame（在两个分界符0x7e之
+  // 间），如果超时，则无论已经读到多少，都返回Nil，即空List。这是因为
+  // 无论已经读到多少，都不是完整的frame。这个空List表示超时。如果是连
+  // 续的两个0x7e之间，这样的空frame会丢弃，不会报错，也不会返回空List。
+  def read_ppp(timeout_millis : Long) : PppFrame = {
     val start_time = System.currentTimeMillis
 
-    def read_with(data : List[Byte]) : List[Byte] = {
+    def read_with(data : List[Byte]) : PppFrame = {
       if(System.currentTimeMillis - start_time > timeout_millis)
-        data                            // return immediately
+        new PppFrame(Protocol.Timeout,   // fail immediately
+                     new ErrorMessage("time out in read_ppp()"))
       else if(in_s.available == 0)
         read_with(data)                 // continue wait to read
       else {
@@ -78,18 +84,40 @@ extends AbstractDuplex {
         else if(data.isEmpty)
           read_with(data) // silently skip empty frame and continue read
         else
-          data
+          PppFrame.parse(data.reverse)
       }        
     }
 
-    decode_0x7d_escape(read_with(Nil).reverse)
+    read_with(Nil)
+  }
+
+  def write_ppp(frame : PppFrame) : Unit = {
+    out_s.write(frame.bytes.toArray)
+    out_s.flush
   }
 }
 
-case class PppFrame(protocol : Protocol,
-                    payload : FramePayload)
+class SessionTimeoutException extends RuntimeException
+class InvalidComposeException extends RuntimeException
 
-trait FramePayload
+case class PppFrame(protocol : Protocol,
+                    payload : FramePayload) {
+  def bytes : List[Byte] = {
+    if(protocol == Protocol.Unknown || payload.isInstanceOf[ErrorMessage])
+      throw new InvalidComposeException
+    else {
+      val protocol_field_bytes = 
+        PppFrame.protocol_indicators.map(_.swap).apply(protocol)
+      val frame_bytes = PppFrame.attach_fcs16(
+        parse_hex("FF 03") ++ protocol_field_bytes ++ payload.bytes)
+      0x7e.toByte +: encode_0x7d_escape(frame_bytes) :+ 0x7e.toByte
+    }      
+  }
+}
+
+trait FramePayload {
+  def bytes : List[Byte]
+}
 
 sealed abstract class Protocol
 object Protocol {
@@ -97,53 +125,18 @@ object Protocol {
   case object PAP extends Protocol
   case object IPCP extends Protocol
   case object IP extends Protocol
+  case object Timeout extends Protocol
   case object Unknown extends Protocol
 }
 
 // wrap a string in FramePayload trait
 class ErrorMessage(val get : String) extends FramePayload {
   override def toString = get
+  override def bytes = throw new InvalidComposeException
 }
 
-class LcpPacket(raw_payload : List[Byte]) extends FramePayload {
-  import LcpCode._
-  val code_names = Map[Byte, LcpCode](1.toByte -> ConfigureRequest,
-                                      2.toByte -> ConfigureAck,
-                                      3.toByte -> ConfigureNak,
-                                      5.toByte -> TerminateRequest,
-                                      6.toByte -> TerminateAck)
-
-  val code : LcpCode = get_code_name(raw_payload(0))
-  val identifier : Byte = raw_payload(1)
-  val length : Int = byte_list_to_int(raw_payload.slice(2,4))
-  val data : List[Byte] = raw_payload.take(length).drop(4)
-
-  def get_code_name(code_byte : Byte) : LcpCode = {
-    if(code_names contains code_byte)
-      code_names(code_byte)
-    else
-      Unknown
-  }
-  
-  override def toString : String = {
-    "LCP(" + code + 
-    "; id: " + to_hex_string(List(identifier)) + 
-    "; data: " + to_hex_string(data) + ")"
-  }
-}
-
-sealed abstract class LcpCode
-object LcpCode {
-  case object ConfigureRequest extends LcpCode
-  case object ConfigureAck extends LcpCode
-  case object ConfigureNak extends LcpCode
-  case object TerminateRequest extends LcpCode
-  case object TerminateAck extends LcpCode
-  case object Unknown extends LcpCode
-}
-
-object Ppp {
-    // fcs相关的函数，都是从rfc 1662附录所规定的循环冗余校验代码中改写过
+object PppFrame {
+  // fcs相关的函数，都是从rfc 1662附录所规定的循环冗余校验代码中改写过
   // 来的。在rfc 1662标准的附录中，有C语言写的求校验的代码。
   private val fcs_table_16 = calculate_fcs_table_16
   
@@ -188,7 +181,7 @@ object Ppp {
   def attach_fcs16(data : List[Byte]) : List[Byte] = 
     data ++ split_word(get_fcs16(data)).reverse  
 
-  private val protocol_indicators : Map[List[Byte], Protocol] =
+  val protocol_indicators : Map[List[Byte], Protocol] =
     Map(parse_hex("C0 21") -> Protocol.LCP,
         parse_hex("C0 23") -> Protocol.PAP,
         parse_hex("80 21") -> Protocol.IPCP,
@@ -196,7 +189,8 @@ object Ppp {
 
   // 四种情况返回失败：第一，数据包长度不足6字节；第二，开头两字节不是
   // FF 03；第三，校验失败；第四，不认识的协议字段。
-  def parse_frame(raw_frame : List[Byte]) : PppFrame = {
+  def parse(raw_bytes : List[Byte]) : PppFrame = {
+    val raw_frame = decode_0x7d_escape(raw_bytes)
     def error(msg : String) : PppFrame = 
       new PppFrame(Protocol.Unknown, new ErrorMessage(msg))    
 
@@ -213,10 +207,261 @@ object Ppp {
       val protocol = protocol_indicators(raw_frame.slice(2,4))
       val payload_data = raw_frame.drop(4).dropRight(2)
       val payload_packet = protocol match {
-        case Protocol.LCP => new LcpPacket(payload_data)
+        case Protocol.LCP => LcpPacket.parse(payload_data)
         case _ => new ErrorMessage("not implemented yet")
       }
       new PppFrame(protocol, payload_packet)
     }
+  }
+}
+
+sealed abstract class LcpCode
+object LcpCode {
+  case object ConfigureRequest extends LcpCode
+  case object ConfigureAck extends LcpCode
+  case object TerminateRequest extends LcpCode
+  case object TerminateAck extends LcpCode
+  case object Unknown extends LcpCode
+}
+
+sealed abstract class LcpState
+object LcpState {
+  object Closed extends LcpState
+  object ReqSent extends LcpState
+  object AckSent extends LcpState
+  object AckRcvd extends LcpState  
+  object Ready extends LcpState
+  object Closing extends LcpState
+  object ClosedByRemote extends LcpState
+}
+
+object LcpPacket {
+  import LcpCode._
+  val code_names = Map[Byte, LcpCode](1.toByte -> ConfigureRequest,
+                                      2.toByte -> ConfigureAck,
+                                      5.toByte -> TerminateRequest,
+                                      6.toByte -> TerminateAck)
+
+  private def get_code_name(code_byte : Byte) : LcpCode = {
+    code_names.getOrElse(code_byte, Unknown)
+  }
+  
+  def parse(raw_bytes : List[Byte]) : LcpPacket = {
+    val code : LcpCode = get_code_name(raw_bytes(0))
+    val identifier : Byte = raw_bytes(1)
+    val length : Int = byte_list_to_int(raw_bytes.slice(2,4))
+    val data : List[Byte] = raw_bytes.take(length).drop(4)
+
+    new LcpPacket(code, identifier, data)
+  }
+}
+
+class LcpPacket(val code : LcpCode, 
+                val identifier : Byte, 
+                val data : List[Byte]) extends FramePayload {
+  def length : Int = data.length + 4
+  
+  override def toString : String = {
+    "LCP(" + code + 
+    "; id: " + to_hex_string(List(identifier)) + 
+    "; data: " + to_hex_string(data) + ")"
+  }
+
+  def bytes : List[Byte] = {
+    if(code == LcpCode.Unknown)
+      throw new InvalidComposeException
+    else {
+      val code_byte = LcpPacket.code_names.map(_.swap).apply(code)
+      val length_bytes = split_word(data.length + 4)
+      code_byte :: identifier :: length_bytes ++ data
+    }
+  }
+}
+
+class LcpAutomaton(val duplex : AbstractDuplex) {
+  import LcpState._
+
+  sealed abstract class LcpEvent
+  object LcpEvent {
+    object OpenConnection extends LcpEvent
+    object CloseConnection extends LcpEvent
+    object ReceiveConfigReq extends LcpEvent
+    object ReceiveConfigAck extends LcpEvent
+    object ReceiveTerminateReq extends LcpEvent
+    object ReceiveTerminateAck extends LcpEvent
+    object SoftTimeout extends LcpEvent
+    object HardTimeout extends LcpEvent
+  }
+  import LcpEvent._
+
+  abstract class LcpAction {
+    def perform : Unit
+  }
+
+  private var the_state : LcpState = Closed
+  private var retransmit_counter : Int = max_retransmit_times
+  private var the_recent_received_packet : LcpPacket = null
+  private var the_recent_sent_packet : LcpPacket = null
+
+  val no_op_action = new LcpAction { def perform : Unit = {} }
+  val get_closed_by_remote_action = new LcpAction { 
+    def perform : Unit = {
+      send_terminate_ack
+      the_state = ClosedByRemote      
+    }
+  }
+  val retransmit_action = new LcpAction {
+    def perform : Unit = {
+      if(recent_sent_packet != null)
+        send_packet(recent_sent_packet)
+    }
+  }
+  val hard_timeout_action = new LcpAction {
+    def perform : Unit = {
+      the_state = Closed
+      throw new SessionTimeoutException
+    }
+  }
+
+  val packet_driven_events = Map[LcpCode, LcpEvent](
+    LcpCode.ConfigureRequest -> ReceiveConfigReq,
+    LcpCode.ConfigureAck -> ReceiveConfigAck,
+    LcpCode.TerminateRequest -> ReceiveTerminateReq,
+    LcpCode.TerminateAck -> ReceiveTerminateAck)
+  
+  val state_transition_table = Map(  
+    (Closed, OpenConnection) -> new LcpAction {
+      def perform : Unit = {
+        initialize_retransmit_counter
+        send_config_request
+        the_state = ReqSent
+        read_from_remote
+      }
+    },
+    (ReqSent, ReceiveConfigReq) -> new LcpAction {
+      def perform : Unit = {
+        send_config_ack
+        the_state = AckSent
+        read_from_remote
+      }
+    },
+    (ReqSent, ReceiveConfigAck) -> new LcpAction {
+      def perform : Unit = {
+        initialize_retransmit_counter
+        the_state = AckRcvd
+        read_from_remote
+      }
+    },
+    (AckSent, ReceiveConfigAck) -> new LcpAction {
+      def perform : Unit = {
+        initialize_retransmit_counter
+        the_state = Ready
+      }
+    },
+    (AckRcvd, ReceiveConfigReq) -> new LcpAction {
+      def perform : Unit = {
+        initialize_retransmit_counter
+        send_config_ack
+        the_state = Ready
+      }
+    },
+    (Ready, CloseConnection) -> new LcpAction {
+      def perform : Unit = {
+        send_terminate_req
+        the_state = Closing
+        read_from_remote
+      }
+    },
+    (Closing, ReceiveTerminateAck) -> new LcpAction {
+      def perform : Unit = {
+        the_state = Closed
+      }
+    },
+    (ReqSent, SoftTimeout) -> retransmit_action,
+    (AckSent, SoftTimeout) -> retransmit_action,
+    (AckRcvd, SoftTimeout) -> retransmit_action,
+    (Closing, SoftTimeout) -> retransmit_action
+  )
+
+  def state = the_state
+  def set_state(s : LcpState) : Unit = { the_state = s } // for testing
+  def recent_received_packet = the_recent_received_packet
+  def recent_sent_packet = the_recent_sent_packet
+
+  def feed_event(event : LcpEvent) : Unit = {
+    val action = if(event == ReceiveTerminateReq) {
+      get_closed_by_remote_action
+    } else if(event == HardTimeout) {
+      hard_timeout_action
+    } else if(!(state_transition_table contains (state, event))) {
+      no_op_action
+    } else {
+      state_transition_table(state, event)
+    }
+
+    action.perform
+  }
+
+  def open : Unit = {
+    this.feed_event(OpenConnection)
+  }
+
+  def close : Unit = {
+    this.feed_event(CloseConnection)
+  }
+
+  def read_from_remote : Unit = {
+    val frame = duplex.read_ppp(request_timeout_interval)
+    if(frame.protocol == Protocol.Timeout) {
+      if(retransmit_counter > 0) {
+        this.feed_event(SoftTimeout)
+        retransmit_counter -= 1
+      } else this.feed_event(HardTimeout)
+    } else if(frame.protocol != Protocol.LCP) {
+      read_from_remote                // silently discard this frame
+    } else {
+      val packet = frame.payload.asInstanceOf[LcpPacket]
+      if(packet.code == LcpCode.Unknown)
+        read_from_remote              // silently discard this frame
+      else {
+        the_recent_received_packet = packet
+        this.feed_event(packet_driven_events(packet.code))
+      }
+    }    
+  }
+
+  def initialize_retransmit_counter : Unit = {
+    retransmit_counter = max_retransmit_times
+  }
+
+  def send_config_request : Unit = {
+    val packet = new LcpPacket(
+      LcpCode.ConfigureRequest, 0x11, our_lcp_config_req_options)
+
+    send_packet(packet)
+  }
+
+  def send_config_ack : Unit = {
+    val packet = new LcpPacket(
+      LcpCode.ConfigureAck, 
+      recent_received_packet.identifier,
+      recent_received_packet.data)
+    
+    send_packet(packet)
+  }
+
+  def send_terminate_req : Unit = {
+    val packet = new LcpPacket(
+      LcpCode.TerminateRequest, 0x15, Nil)
+
+    send_packet(packet)
+  }
+
+  def send_terminate_ack : Unit = {
+  }
+
+  def send_packet(packet : LcpPacket) : Unit = {
+    the_recent_sent_packet = packet
+    duplex.write_ppp(new PppFrame(Protocol.LCP, packet))
   }
 }
