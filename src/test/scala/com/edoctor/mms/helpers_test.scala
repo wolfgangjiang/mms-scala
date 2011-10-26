@@ -6,7 +6,7 @@ import org.scalatest.Spec
 import org.scalatest.matchers.ShouldMatchers
 
 @RunWith(classOf[JUnitRunner])
-class HelpersBasicSpec extends Spec with ShouldMatchers {
+class HelpersSpecBasic extends Spec with ShouldMatchers {
   import SessionHelpers._
 
   describe("decode_0x7d_escape") {

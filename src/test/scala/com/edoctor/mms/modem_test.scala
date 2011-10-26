@@ -22,7 +22,17 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
           test_ATZ
           test_AT_IPR
           test_dial
-          test_first_incoming_lcp_packet
+          test_first_incoming_lcp_packet_raw
+        }
+      }
+    }
+
+    it("works well with local automaton") {
+      with_telnet_connection("192.168.10.243", 962) {
+        dpx => {
+          duplex = dpx
+          test_dial
+          test_first_incoming_lcp_packet_parsed
         }
       }
     }
@@ -49,9 +59,21 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
     response should include ("~") // 0x7e, PPP数据包的边界标识字符    
   }
 
-  private def test_first_incoming_lcp_packet : Unit = {
+  private def test_first_incoming_lcp_packet_raw : Unit = {
     read_next_packet
     recent_packet should be(parse_hex("FF 03 C0 21 01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 26 B4"))
+  }
+
+  private def test_first_incoming_lcp_packet_parsed : Unit = {
+    read_next_packet
+
+    val frame = Ppp.parse_frame(recent_packet)
+    frame.protocol should be(Protocol.LCP)
+    val lcp_packet = frame.payload.asInstanceOf[LcpPacket]
+    lcp_packet.code should be(LcpCode.ConfigureRequest)
+    lcp_packet.identifier should be(1)
+    lcp_packet.data.first should be(1)
+    lcp_packet.data.last should be(0x23)    
   }
 
   protected def read_next_packet : Unit = {
