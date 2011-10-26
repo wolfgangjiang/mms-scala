@@ -890,3 +890,68 @@ object IpDatagram {
                    data)
   }
 }
+
+// =============================
+// UDP protocol
+// =============================
+class UdpDatagram(val source_port : Int,
+                  val destination_port : Int,
+                  val data : List[Byte]) {
+  val length = data.length + 8
+
+  // this is with checksum field set to zero
+  private def holo_bytes : List[Byte] = {
+    split_word(source_port) ++
+    split_word(destination_port) ++
+    split_word(length) ++
+    split_word(0) ++ // checksum field
+    data
+  }
+
+  // this is with pseudo header 
+  private def compute_udp_checksum(
+    source_ip_addr : List[Byte],
+    destination_ip_addr : List[Byte]) : Int = {
+    val pseudo_header = UdpDatagram.make_pseudo_header(
+      source_ip_addr, destination_ip_addr, length)
+      
+    compute_checksum(pseudo_header ++ holo_bytes)
+  }
+
+  def bytes(source_ip_addr : List[Byte],
+            destination_ip_addr : List[Byte]) : List[Byte] = {
+    val checksum = compute_udp_checksum(source_ip_addr,
+                                        destination_ip_addr)
+    holo_bytes.patch(6, split_word(checksum), 2)
+  }
+}
+
+object UdpDatagram {
+  // Method parse() do not check validity of a list of bytes.  You
+  // should ensure it is valid by call is_header_checksum_good()
+  // first.
+  def parse(bytes : List[Byte]) : UdpDatagram = {
+    val source_port = byte_list_to_int(bytes.slice(0, 2))
+    val destination_port = byte_list_to_int(bytes.slice(2, 4))
+    val length = byte_list_to_int(bytes.slice(4, 6))
+    val data = bytes.take(length).drop(8)
+
+    new UdpDatagram(source_port, destination_port, data)
+  }
+
+  def is_checksum_good(bytes : List[Byte],
+                       source_ip_addr : List[Byte],
+                       destination_ip_addr : List[Byte]) : Boolean = {
+    val pseudo_header = 
+      make_pseudo_header(source_ip_addr, destination_ip_addr, bytes.length)
+
+    (bytes.length >= 8) && (compute_checksum(pseudo_header ++ bytes) == 0)
+  }
+
+  def make_pseudo_header(source_ip_addr : List[Byte],
+                         destination_ip_addr : List[Byte],
+                         length : Int) : List[Byte] = {
+    source_ip_addr ++ destination_ip_addr ++
+    parse_hex("00 11") ++ split_word(length)  // protocol == 0x0011 == udp
+  }
+}

@@ -38,3 +38,45 @@ class IpDatagramSpecBasic extends Spec with ShouldMatchers {
     }
   }
 }
+
+@RunWith(classOf[JUnitRunner]) 
+class UdpDatagramSpecBasic extends Spec with ShouldMatchers {
+  val source_ip_addr = parse_ip("10.123.221.2")
+  val destination_ip_addr = parse_ip("10.0.0.127")
+  describe("udp datagram object") {
+    val example_bytes = parse_hex("1A 1A 40 11 00 0A 00 00 DA DA")
+    it("can parse a datagram without checking checksum") {
+      val datagram = UdpDatagram.parse(example_bytes)
+      datagram.source_port should be (0x1A1A)
+      datagram.destination_port should be (0x4011)
+      datagram.length should be (10)
+      datagram.data should be (parse_hex("DA DA"))
+    }
+    it("provides checksum calculating outside parsing") {
+      expect(false) {
+        UdpDatagram.is_checksum_good(
+          example_bytes, source_ip_addr, destination_ip_addr)
+      }
+    }
+  }
+
+  describe("udp datagram class") {
+    val datagram = new UdpDatagram(
+      9201, 2048, parse_hex("DA DA"))
+    
+    it("can convert to bytes") {
+      expect(10) {
+        datagram.bytes(source_ip_addr,
+                       destination_ip_addr).length
+      }
+    }
+    it("has a correct checksum") {
+      val pseudo_header = UdpDatagram.make_pseudo_header(
+        source_ip_addr, destination_ip_addr, 10)
+      expect(0) {
+        compute_checksum(pseudo_header ++ datagram.bytes(
+          source_ip_addr, destination_ip_addr))
+      }
+    }
+  }
+}
