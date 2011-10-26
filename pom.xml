@@ -156,6 +156,7 @@
         <version>2.9</version>
         <configuration>
           <includes>
+            <include>**/*BasicSpec.class</include>
             <include>**/*SpecWithActual.class</include>
             <include>**/*SpecWithMock.class</include>
           </includes>

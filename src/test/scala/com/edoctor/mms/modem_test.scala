@@ -5,6 +5,8 @@ import org.scalatest.junit.JUnitRunner
 import org.scalatest.Spec
 import org.scalatest.matchers.ShouldMatchers
 
+import SessionHelpers._
+
 abstract class AbstractModemSpec extends Spec
 with ShouldMatchers with AbstractRemote
 
@@ -12,18 +14,33 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
   private var duplex : AbstractDuplex = null
   private var the_recent_packet : List[Byte] = null
   
-
-  it("整体运行良好") {
-    with_telnet_connection("192.168.10.243", 961) {
-      dpx => {
-        duplex = dpx
-        test_dial
-        test_first_incoming_lcp_packet
+  describe("remote") {
+    it("is sane") {
+      with_telnet_connection("192.168.10.243", 961) {
+        dpx => {
+          duplex = dpx
+          test_ATZ
+          test_AT_IPR
+          test_dial
+          test_first_incoming_lcp_packet
+        }
       }
     }
   }
 
   private def recent_packet = the_recent_packet
+
+  private def test_ATZ : Unit = {
+    duplex.say_text("ATZ")
+    val response = duplex.listen_text(300L)
+    response should include ("OK")
+  }
+
+  private def test_AT_IPR : Unit = {
+    duplex.say_text("AT+IPR?")
+    val response = duplex.listen_text(300L)
+    response should include ("115200")
+  }
 
   private def test_dial : Unit = {
     duplex.say_text("ATD*99***1#")
@@ -34,8 +51,7 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
 
   private def test_first_incoming_lcp_packet : Unit = {
     read_next_packet
-    recent_packet(0) should be(0xFF.toByte)
-    recent_packet.length should be(48)
+    recent_packet should be(parse_hex("FF 03 C0 21 01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 26 B4"))
   }
 
   protected def read_next_packet : Unit = {

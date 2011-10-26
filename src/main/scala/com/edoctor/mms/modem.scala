@@ -1,5 +1,8 @@
 package com.edoctor.mms
 
+import SessionHelpers._
+import SessionParameters._
+
 trait AbstractRemote {
   def with_telnet_connection(modem_ip : String, modem_port : Int) 
     (block : AbstractDuplex => Unit) : Unit
@@ -38,34 +41,47 @@ extends AbstractDuplex {
   }
 
   // 阻塞读取，直到超时，把所读到的内容返回。
+  // 但如果读到0x7e（'~'），却立刻返回，不吃掉紧随其后的二进制数据包。
   def listen_text(timeout_millis : Long) : String = {
     val start_time = System.currentTimeMillis
-    val data = new StringBuffer
 
-    while(System.currentTimeMillis - start_time < timeout_millis) {
-      if(in_s.available > 0) 
-        data.append(in_s.read.toChar)
+    def listen_with(data : String) : String = {
+      Thread.sleep(burst_read_interval)
+      if(System.currentTimeMillis - start_time > timeout_millis)
+        data                            // read immediately
+      else if(in_s.available == 0)
+        listen_with(data)               // continue wait to read
+      else {
+        val ch = in_s.read.toChar
+        if(ch == '~')
+          data + ch  // return immediately, do not consume binary data
+        else
+          listen_with(data + ch)
+      }      
     }
 
-    data.toString.trim      
+    listen_with("").trim
   }
 
   def read_binary(timeout_millis : Long) : List[Byte] = {
     val start_time = System.currentTimeMillis
-    var data = List[Byte]()
-    var going = true
 
-    while(System.currentTimeMillis - start_time < timeout_millis && going) {
-      if(in_s.available > 0) {
+    def read_with(data : List[Byte]) : List[Byte] = {
+      if(System.currentTimeMillis - start_time > timeout_millis)
+        data                            // return immediately
+      else if(in_s.available == 0)
+        read_with(data)                 // continue wait to read
+      else {
         val octet = in_s.read.toByte
-        if(octet != 0x7e.toByte) {
-          data = octet :: data
-        } else if(data.length > 0) {
-            going = false
-        } // else do not append and wait for next
-      }
+        if(octet != 0x7e.toByte) 
+          read_with(octet :: data)
+        else if(data.isEmpty)
+          read_with(data) // silently skip empty frame and continue read
+        else
+          data
+      }        
     }
 
-    data.reverse
+    decode_0x7d_escape(read_with(Nil).reverse)
   }
 }
