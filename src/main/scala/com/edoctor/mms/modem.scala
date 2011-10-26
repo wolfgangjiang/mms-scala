@@ -129,6 +129,7 @@ class SessionTimeoutException extends RuntimeException
 class InvalidComposeException extends RuntimeException
 class ClosedByRemoteException extends RuntimeException
 class AuthenticateFailureException extends RuntimeException
+class MalformedIpAddressException extends RuntimeException
 
 case class PppFrame(protocol : Protocol,
                     payload : FramePayload) {
@@ -239,6 +240,7 @@ object PppFrame {
       val payload_packet = protocol match {
         case Protocol.LCP => LcpPacket.parse(payload_data)
         case Protocol.PAP => PapPacket.parse(payload_data)
+        case Protocol.IPCP => IpcpPacket.parse(payload_data)
         case _ => new ErrorMessage("not implemented yet")
       }
       new PppFrame(protocol, payload_packet)
@@ -601,7 +603,7 @@ class PapAutomaton(val duplex : AbstractDuplex,
     else {
       val packet = frame.payload.asInstanceOf[PapPacket]
       if(packet.code == PapCode.AuthenticateAck) {
-        // success, return without incident
+        // success, do nothing and return without incident
       }
       else if(packet.code == PapCode.AuthenticateNak)
         throw new AuthenticateFailureException
@@ -626,5 +628,169 @@ class PapAutomaton(val duplex : AbstractDuplex,
     the_recent_sent_packet = packet
     the_request_sent_time = System.currentTimeMillis
     duplex.write_ppp(new PppFrame(Protocol.PAP, packet))
+  }
+}
+
+sealed abstract class IpcpCode
+object IpcpCode {
+  case object ConfigureRequest extends IpcpCode
+  case object ConfigureAck extends IpcpCode
+  case object ConfigureNak extends IpcpCode
+  case object Unknown extends IpcpCode
+}
+
+object IpcpPacket {
+  import IpcpCode._
+  val code_names = Map[Byte, IpcpCode](1.toByte -> ConfigureRequest,
+                                       2.toByte -> ConfigureAck,
+                                       3.toByte -> ConfigureNak)
+
+  private def get_code_name(code_byte : Byte) : IpcpCode = {
+    code_names.getOrElse(code_byte, Unknown)
+  }
+
+  def parse(raw_bytes : List[Byte]) : IpcpPacket = {
+    val identifier : Byte = raw_bytes(1)
+    val length : Int = byte_list_to_int(raw_bytes.slice(2,4))
+    val data : List[Byte] = raw_bytes.take(length).drop(4)
+    val ip_list : List[Byte] = 
+      if(data.length == 6 && data.slice(0,2) == parse_hex("03 06"))
+        data.drop(2)
+      else
+        null
+    val code : IpcpCode = // both unknown code and malformed ip are Unknown 
+      if(ip_list == null)
+        Unknown
+      else
+        get_code_name(raw_bytes(0))
+
+    new IpcpPacket(code, identifier, ip_list)
+  }
+}
+
+class IpcpPacket(val code : IpcpCode,
+                 val identifier : Byte,
+                 val ip_list : List[Byte]) extends FramePayload {
+  val length : Int = 10 // 4 + "03 06" + ip_list, where ip_list.length == 4
+
+  override def toString : String = {
+    "IPCP(" + code +
+    "; id: 0x" + to_hex_string(List(identifier)) +
+    "; ip_addr: " + ip_to_string(ip_list)
+  }
+
+  def bytes : List[Byte] = {
+    if(code == IpcpCode.Unknown)
+      throw new InvalidComposeException
+    else {
+      val code_byte = IpcpPacket.code_names.map(_.swap).apply(code)
+      val length_bytes = split_word(length)
+      (code_byte :: identifier :: length_bytes ++ 
+       parse_hex("03 06") ++ ip_list)
+    }
+  }
+}
+
+class IpcpAutomaton(val duplex : AbstractDuplex,
+                    val id_counter : PppIdCounter) {
+  private var recent_sent_packet : IpcpPacket = null
+  private var recent_received_packet : IpcpPacket = null
+  private var my_ip_list : List[Byte] = null
+
+  private var recent_sent_time : Long = System.currentTimeMillis
+  private var retransmit_counter = max_retransmit_times
+  
+  def timeout = {
+    (System.currentTimeMillis - recent_sent_time > 
+     request_timeout_interval)
+  }
+
+  def get_ip : List[Byte] = {
+    initialize_retransmit_counter
+    send_first_config_request
+    read_from_remote_and_process
+  }
+
+  def initialize_retransmit_counter : Unit = {
+    retransmit_counter = max_retransmit_times
+  }
+
+  def read_from_remote_and_process : List[Byte] = {
+    val frame = duplex.read_ppp(request_timeout_interval)
+
+    if((frame.protocol != Protocol.IPCP && timeout) ||
+       frame.protocol == Protocol.Timeout) {
+      if(retransmit_counter > 0) {
+        retransmit   // soft timeout
+        read_from_remote_and_process
+      }
+      else
+        throw new SessionTimeoutException  // hard timeout      
+    } 
+    else if(frame.protocol != Protocol.IPCP) 
+      read_from_remote_and_process      // silently discard
+    else {
+      val packet = frame.payload.asInstanceOf[IpcpPacket]
+      recent_received_packet = packet
+      if(packet.code == IpcpCode.ConfigureRequest) {
+        send_configure_ack
+        read_from_remote_and_process
+      } 
+      else if(packet.code == IpcpCode.ConfigureNak) {
+        initialize_retransmit_counter
+        my_ip_list = packet.ip_list
+        send_second_config_request
+        read_from_remote_and_process
+      }
+      else if(packet.code == IpcpCode.ConfigureAck) {
+        my_ip_list // return, this is the only exit of this function
+      }
+      else
+        read_from_remote_and_process
+    }
+  }
+
+  def send_first_config_request : Unit = {
+    val first_config_req = new IpcpPacket(
+      IpcpCode.ConfigureRequest, 
+      id_counter.get_id, 
+      parse_hex("00 00 00 00"))
+    
+    send_packet(first_config_req)
+  }
+
+  def send_second_config_request : Unit = {
+    val second_config_req = new IpcpPacket(
+      IpcpCode.ConfigureRequest, 
+      id_counter.get_id, 
+      my_ip_list)
+    
+    send_packet(second_config_req)
+  }
+
+  def send_configure_ack : Unit = {
+    val config_ack = new IpcpPacket(
+      IpcpCode.ConfigureAck,
+      recent_received_packet.identifier,
+      recent_received_packet.ip_list)
+
+    send_packet(config_ack)
+  }
+
+  def retransmit : Unit = {
+    if(recent_sent_packet != null) {
+      val retransmit_packet = new IpcpPacket(
+        recent_sent_packet.code,
+        id_counter.get_id,  // a new id
+        recent_sent_packet.ip_list)
+      send_packet(retransmit_packet)
+    }
+    retransmit_counter -= 1
+  }
+
+  def send_packet(packet : IpcpPacket) : Unit = {
+    recent_sent_time = System.currentTimeMillis
+    recent_sent_packet = packet
+    duplex.write_ppp(new PppFrame(Protocol.IPCP, packet))    
   }
 }

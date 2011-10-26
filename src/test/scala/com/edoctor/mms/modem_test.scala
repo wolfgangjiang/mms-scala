@@ -29,6 +29,8 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
           lcp_automaton.state should be (LcpState.Ready)
           val pap_automaton = new PapAutomaton(duplex, ppp_id_counter)
           pap_automaton.authenticate
+          val ipcp_automaton = new IpcpAutomaton(duplex, ppp_id_counter)
+          ipcp_automaton.get_ip should have length (4)
           lcp_automaton.close
           lcp_automaton.state should be (LcpState.Closed)
         }
@@ -85,13 +87,18 @@ class MockDuplex extends AbstractDuplex with ShouldMatchers{
     "FF 03 C0 21 02 11 00 0A 02 06 00 00 00 00 A5 F0",
     "FF 03 C0 23 02 12 00 0D 08 57 65 6C 63 6F 6D 65 21 32 CD",
     "FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F B3 A7",
-    "FF 03 C0 21 06 13 00 04 DD D2")
+    "FF 03 80 21 03 13 00 0A 03 06 0A B8 EB F2 B1 5D",
+    "FF 03 80 21 02 14 00 0A 03 06 0A B8 EB F2 74 98",
+    "FF 03 C0 21 06 15 00 04 04 04")
 
   val should_send_list = List[String](
     "FF 03 C0 21 01 11 00 0A 02 06 00 00 00 00 CC 84",
     "FF 03 C0 21 02 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 D0 47",    
     "FF 03 C0 23 01 12 00 06 00 00 0D 80",
-    "FF 03 C0 21 05 13 00 04 10 F7")
+    "FF 03 80 21 01 13 00 0A 03 06 00 00 00 00 7D 4C",
+    "FF 03 80 21 02 01 00 0A 03 06 C0 A8 6F 6F DA D3",
+    "FF 03 80 21 01 14 00 0A 03 06 0A B8 EB F2 1D EC",
+    "FF 03 C0 21 05 15 00 04 C9 21")
 
   var should_receive_pointer : Int = 0
   var should_send_pointer : Int = 0

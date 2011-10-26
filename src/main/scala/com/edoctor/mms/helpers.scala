@@ -64,6 +64,22 @@ object SessionHelpers {
 
     recur(list, 0)
   }  
+
+  // 将形如"192.168.10.51"的字符串转化为二进制串。如果长度不是4个字节，
+  // 会抛出异常。
+  def parse_ip(ip_str : String) : List[Byte] = {
+    val ip_list = ip_str.split("\\.").toList.map(s => (s.toInt & 0xFF).toByte)
+    if(ip_list.length != 4)
+      throw new MalformedIpAddressException
+    ip_list
+  }
+
+  // parse_ip的逆运算，将二进制串表示的ip地址转化为“用点号分隔的数字”字
+  // 符串。
+  def ip_to_string(ip_list : List[Byte]) : String = {
+    assert(ip_list.length == 4)
+    ip_list.map(x => (x.toInt & 0xFF)).mkString(".")
+  }
 }
 import SessionHelpers._
 
@@ -81,6 +97,4 @@ object SessionParameters {
   val our_lcp_config_req_options = parse_hex("02 06 00 00 00 00")
 
   val our_pap_auth_req_info = parse_hex("00 00")
-
-  val our_ipcp_initial_req_options = parse_hex("03 06 00 00 00 00")
 }

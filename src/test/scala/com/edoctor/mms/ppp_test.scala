@@ -495,3 +495,208 @@ class PapAutomatonSpecBasic extends Spec with ShouldMatchers {
     mock_duplex should be ('satisfied)    
   }
 }
+
+
+//IpcpPacket should:
+// can parse raw bytes and return a packet object
+// convert to raw bytes
+// can label unknown code as IpcpCode.Unknown
+// can label malformed ip address as IpcpCode.Unknown
+// can compose a packet
+// can compose a packet and get raw bytes
+@RunWith(classOf[JUnitRunner])
+class IpcpPacketSpecBasic extends Spec with ShouldMatchers {
+  val config_req = parse_hex("01 01 00 0A 03 06 C0 A8 6F 6F")
+  val config_nak = parse_hex("03 01 00 0A 03 06 0A 12 34 56")
+
+  describe("IpcpPacket object") {
+    it("can parse raw bytes and return a packet object") {
+      val packet = IpcpPacket.parse(config_req)
+      packet.code should be (IpcpCode.ConfigureRequest)
+      packet.identifier should be (0x01)
+      packet.length should be (config_req.length)
+      packet.ip_list should be (parse_hex("C0 A8 6F 6F"))
+    }
+
+    it("can convert to raw bytes") {
+      val packet = IpcpPacket.parse(config_req)
+      packet.bytes should be (config_req)
+    }
+
+    it("can label unknown code as IpcpCode.Unknown") {
+      val packet = IpcpPacket.parse(0x55.toByte :: config_req.tail)
+      packet.code should be (IpcpCode.Unknown)
+    }
+
+    it("can label malformed ip address as IpcpCode.Unknown") {
+      val packet = IpcpPacket.parse(config_req.init)
+      packet.code should be (IpcpCode.Unknown)
+    }
+  }
+
+  describe("IpcpPacket class") {
+    it("can compose a packet") {
+      val packet = new IpcpPacket(
+        IpcpCode.ConfigureNak, 0x01.toByte, parse_hex("0A 12 34 56"))
+      packet.code should be (IpcpCode.ConfigureNak)
+      packet.identifier should be (0x01.toByte)
+      packet.ip_list should be (parse_hex("0A 12 34 56"))
+    }
+
+    it("can compose a packet and get raw bytes") {
+      val packet = new IpcpPacket(
+        IpcpCode.ConfigureNak, 0x01.toByte, parse_hex("0A 12 34 56"))
+      packet.bytes should be (config_nak)
+    }
+  }
+}
+
+//IpcpAutomaton should:
+// send a config-req with 0.0.0.0 when activated
+// send a config-ack when received a config-req
+// record ip and send a new config-req when received config-nak
+// successfully return ip_list when received a config-ack
+// retransmit when timeout
+// throw SessionTimeoutException when too many timeouts
+// silently discard unknown packets and malformed packets
+// unsuccessful or unexpected interactions will result in timeout
+@RunWith(classOf[JUnitRunner])
+class IpcpAutomatonSpecBasic extends Spec with ShouldMatchers {
+  val remote_config_req = new IpcpPacket(
+    IpcpCode.ConfigureRequest, 0x01, parse_hex("12 34 AB CD"))
+  val config_nak = new IpcpPacket(
+    IpcpCode.ConfigureNak, 0x01, parse_hex("AB CD 43 21"))
+  val config_ack = new IpcpPacket(
+    IpcpCode.ConfigureAck, 0x01, parse_hex("AB CD 43 21"))
+
+  private def extract_ipcp(frame : PppFrame) : IpcpPacket = {
+    frame.protocol should be (Protocol.IPCP)
+    frame.payload.asInstanceOf[IpcpPacket]
+  }
+
+  describe("on negotiation") {
+    def check_happy_path(block : MockFrameDuplex => Unit) : Unit = {
+      val mock_duplex = new MockFrameDuplex
+      
+      block(mock_duplex)
+
+      val id_counter = new PppIdCounter(0x20)
+      val automaton = new IpcpAutomaton(mock_duplex, id_counter)
+      try {
+        automaton.get_ip
+      } catch {
+        case e : SessionTimeoutException => 
+      }
+
+      mock_duplex should be ('satisfied)      
+    }
+    
+    it("sends a config-req with 0.0.0.0 when activated") {
+      check_happy_path( mock_duplex => {
+        mock_duplex.check( frame => {
+          val packet = extract_ipcp(frame)
+          packet.code should be (IpcpCode.ConfigureRequest)
+          packet.ip_list should be (parse_hex("00 00 00 00"))
+        })
+      })
+    }
+    
+    it("sends a config-ack when received a config-req") {
+      check_happy_path(mock_duplex => {
+        mock_duplex.produce(new PppFrame(Protocol.IPCP, remote_config_req))
+        mock_duplex.check( frame => { } ) // a dummy config request
+        mock_duplex.check( frame => {
+          val packet = extract_ipcp(frame)
+          packet.code should be (IpcpCode.ConfigureAck)
+          packet.identifier should be (0x01)
+          packet.ip_list should be (parse_hex("12 34 AB CD"))
+        })
+      })
+    }
+
+    it("record ip and send a new config-req when received config-nak") {
+      check_happy_path(mock_duplex => {
+        mock_duplex.produce(new PppFrame(Protocol.IPCP, config_nak))
+        mock_duplex.check( frame => { } ) // a dummy config request
+        mock_duplex.check( frame => {
+          val packet = extract_ipcp(frame)
+          packet.code should be (IpcpCode.ConfigureRequest)
+          packet.identifier should not be (0x01)
+          packet.ip_list should be (parse_hex("AB CD 43 21"))
+        })
+      })
+    }
+
+    it("successfully return ip_list when received a config-ack") {
+      val mock_duplex = new MockFrameDuplex
+      
+      mock_duplex.produce(new PppFrame(Protocol.IPCP, config_nak))
+      mock_duplex.produce(new PppFrame(Protocol.IPCP, config_ack))
+
+      val id_counter = new PppIdCounter(0x20)
+      val automaton = new IpcpAutomaton(mock_duplex, id_counter)
+      try {
+        automaton.get_ip should be (config_nak.ip_list)
+      } catch {
+        case e : SessionTimeoutException => 
+      }
+
+      mock_duplex should be ('satisfied)      
+    }
+  }
+
+  describe("on timeout") {
+    it("retransmits if timeout") {
+      val mock_duplex = new MockFrameDuplex
+
+      mock_duplex.check( frame => {
+        val packet = extract_ipcp(frame)
+        packet.identifier should be (0x1F)
+      })
+      mock_duplex.check( frame => {
+        val packet = extract_ipcp(frame)
+        packet.identifier should be (0x20)
+      })
+      mock_duplex.check( frame => {
+        val packet = extract_ipcp(frame)
+        packet.identifier should be (0x21)
+      })
+
+      val id_counter = new PppIdCounter(0x1E)
+      val automaton = new IpcpAutomaton(mock_duplex, id_counter)
+      try {
+        automaton.get_ip
+      } catch {
+        case e : SessionTimeoutException =>
+      }
+      mock_duplex should be ('satisfied)
+    }
+
+    it("throw SessionTimeoutException if too many timeouts") {
+      val mock_duplex = new MockFrameDuplex
+
+      val id_counter = new PppIdCounter(0x20)
+      val automaton = new IpcpAutomaton(mock_duplex, id_counter)
+      intercept[SessionTimeoutException] {
+        automaton.get_ip
+      }
+      mock_duplex should be ('satisfied)    
+    }
+
+    it("deem as timeout if only received unknown packets") {
+      val mock_duplex = new MockFrameDuplex
+
+      // irrelevant LCP packets
+      (1 to 4).foreach { _ =>
+        mock_duplex.produce(new PppFrame(Protocol.LCP, config_nak))
+      }
+      
+      val id_counter = new PppIdCounter(0x1E)
+      val automaton = new IpcpAutomaton(mock_duplex, id_counter)
+      intercept[SessionTimeoutException] {
+        automaton.get_ip
+      }
+      mock_duplex should be ('satisfied)    
+    }
+  }
+}
