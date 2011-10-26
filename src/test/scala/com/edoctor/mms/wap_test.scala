@@ -90,6 +90,12 @@ class UdpDatagramSpecBasic extends Spec with ShouldMatchers {
           source_ip_addr, destination_ip_addr))
       }
     }
+    it("can be correctly unpacked back") {
+      UdpDatagram.unpack(
+        datagram.bytes(source_ip_addr, destination_ip_addr), 
+        source_ip_addr, 
+        destination_ip_addr) should be a ('right)
+    }
   }
 }
 
@@ -98,25 +104,25 @@ class WapSpecBasic extends Spec with ShouldMatchers {
   describe("WtpHeader") {
     it("is fine with typical connect invoke") {
       expect(parse_hex("0A 00 01 02")) {
-        (new WtpHeader(PduType.Invoke, 1, true, 2, 0)).bytes
+        (new WtpHeader(WtpPduType.Invoke, 1, true, 2, 0)).bytes
       }
     }
 
     it("is fine with typical disconnect invoke") {
       expect(parse_hex("0A 00 01 00")) {
-        (new WtpHeader(PduType.Invoke, 1, true, 0, 0)).bytes
+        (new WtpHeader(WtpPduType.Invoke, 1, true, 0, 0)).bytes
       }
     }
 
     it("is fine with typical segmented invoke") {
       expect(parse_hex("28 00 02 25")) {
-        (new WtpHeader(PduType.SegmentedInvoke, 2, false, 0, 0x25)).bytes
+        (new WtpHeader(WtpPduType.SegmentedInvoke, 2, false, 0, 0x25)).bytes
       }
     }
 
     it("can recognize pdu type from byte list") {
-      expect(PduType.Result) {
-        WtpHeader.get_pdu_type(parse_hex("12 80 01"))
+      expect(WtpPduType.Result) {
+        WtpHeader.get_wtp_pdu_type(parse_hex("12 80 01"))
       }
     }
   }
@@ -144,3 +150,135 @@ class WapSpecBasic extends Spec with ShouldMatchers {
 // throw SessionTimeoutException if too many timeouts
 // retransmit specified segment on remote nak
 // throw SessionTimeoutException if cannot receive remote ack
+@RunWith(classOf[JUnitRunner])
+class WspAutomatonSpecBasic extends Spec with ShouldMatchers {
+  def dummy_ip = parse_ip("1.1.1.1")
+
+  def make_mock_duplex : UdpDuplex = {
+    new UdpDuplex(new MockFrameDuplex(0x20),
+                  dummy_ip, 1,
+                  dummy_ip, 1)
+  }
+
+  def get_ppp_mock(duplex : UdpDuplex) : MockFrameDuplex = {
+    duplex.ppp_duplex.asInstanceOf[MockFrameDuplex]
+  }
+
+  def extract_wtp(frame : PppFrame) : List[Byte] = {
+    frame.protocol should be (Protocol.IP)
+    val ip_data = frame.payload.asInstanceOf[IpData].bytes
+    val data_inside_ip = IpDatagram.unpack(ip_data)
+    data_inside_ip should be a ('right)
+    val data_inside_udp = 
+      UdpDatagram.unpack(data_inside_ip.right.get, dummy_ip, dummy_ip)
+    data_inside_udp should be a ('right)
+    data_inside_udp.right.get
+  }
+
+  describe("when connecting") {
+    it("sends a connect invoke when told to open connection") {
+      val mock_duplex = make_mock_duplex
+
+      get_ppp_mock(mock_duplex).check( frame => {
+        val data = extract_wtp(frame)
+        WtpHeader.get_wtp_pdu_type(data) should be (WtpPduType.Invoke)
+        WspPduType.get_wsp_pdu_type(data) should be (WspPduType.Connect)
+      })
+
+      val wsp_automaton = new WspAutomaton(mock_duplex)
+      try { wsp_automaton.connect } 
+      catch { case e : SessionTimeoutException => }
+
+      get_ppp_mock(mock_duplex) should be ('satisfied)
+    }
+
+    it("sends an ack when received connectReply and returns as success") {
+      val mock_duplex = make_mock_duplex
+
+      val dummy_connect_reply = parse_hex("12 80 15 02 00 00")
+      val udp_datagram = new UdpDatagram(1, 1, dummy_connect_reply)
+      val ip_datagram = 
+        new IpDatagram(123, dummy_ip, dummy_ip, udp_datagram)
+      val ip_data = new IpData(ip_datagram.bytes)
+
+      get_ppp_mock(mock_duplex).produce(new PppFrame(Protocol.IP, ip_data))
+      get_ppp_mock(mock_duplex).check( frame => { } ) // connect invoke
+      get_ppp_mock(mock_duplex).check( frame => {
+        val data = extract_wtp(frame)
+        WtpHeader.get_wtp_pdu_type(data) should be (WtpPduType.Ack)
+        WtpHeader.get_tid(data) should be (0x15)
+      })
+
+      val wsp_automaton = new WspAutomaton(mock_duplex)
+      wsp_automaton.connect 
+      wsp_automaton.state should be (WspState.Connected)
+
+      get_ppp_mock(mock_duplex) should be ('satisfied)
+    }
+  }
+
+  describe("when told to disconnect") {
+    it("sends a disconnect invoke and returns as Closed") {
+      val mock_duplex = make_mock_duplex
+
+      get_ppp_mock(mock_duplex).check( frame => {
+        val data = extract_wtp(frame)
+        WtpHeader.get_wtp_pdu_type(data) should be (WtpPduType.Invoke)
+        WspPduType.get_wsp_pdu_type(data) should be (WspPduType.Disconnect)
+      })
+
+      val wsp_automaton = new WspAutomaton(mock_duplex)
+      wsp_automaton.set_state(WspState.Connected)
+      wsp_automaton.disconnect 
+      wsp_automaton.state should be (WspState.Closed)
+
+      get_ppp_mock(mock_duplex) should be ('satisfied)
+    }    
+  }
+
+  describe("when timeout") {
+    it("retransmits when timeout") {
+      val mock_duplex = make_mock_duplex
+      val ppp_mock_duplex = get_ppp_mock(mock_duplex)
+
+      val dummy_connect_reply = parse_hex("12 80 01 02 00 00")
+      val udp_datagram = new UdpDatagram(1, 1, dummy_connect_reply)
+      val ip_datagram = 
+        new IpDatagram(123, dummy_ip, dummy_ip, udp_datagram)
+      val ip_data = new IpData(ip_datagram.bytes)
+
+      ppp_mock_duplex.produce(ppp_mock_duplex.default_timeout_frame)
+      ppp_mock_duplex.produce(ppp_mock_duplex.default_timeout_frame)
+      ppp_mock_duplex.produce(new PppFrame(Protocol.IP, ip_data))
+      (1 to 3).foreach( _ =>
+        ppp_mock_duplex.check( frame => { 
+          val data = extract_wtp(frame)
+          WtpHeader.get_wtp_pdu_type(data) should be (WtpPduType.Invoke)
+        })) // connect invoke
+      ppp_mock_duplex.check( frame => {
+        val data = extract_wtp(frame)
+        WtpHeader.get_wtp_pdu_type(data) should be (WtpPduType.Ack)
+      })
+
+      val wsp_automaton = new WspAutomaton(mock_duplex)
+      wsp_automaton.connect 
+      wsp_automaton.state should be (WspState.Connected)
+
+      ppp_mock_duplex should be ('satisfied)
+    }
+
+    it("throws SessionTimeoutException when too many timeouts") {
+      val mock_duplex = make_mock_duplex
+
+      val wsp_automaton = new WspAutomaton(mock_duplex)
+      intercept[SessionTimeoutException] {
+        wsp_automaton.connect
+      }
+    }
+  }
+}
+
+
+
+//Further : any unhandled packets and timeouts should be logged
+//Further : wsp pdu types should get some symbolic representation

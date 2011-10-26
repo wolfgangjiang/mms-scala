@@ -94,23 +94,47 @@ with ShouldMatchers{
 
   private var text_response = ""
 
+
+
   val should_receive_list = List[String](
     "FF 03 C0 21 01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 26 B4",
     "FF 03 C0 21 02 11 00 0A 02 06 00 00 00 00 A5 F0",
     "FF 03 C0 23 02 12 00 0D 08 57 65 6C 63 6F 6D 65 21 32 CD",
     "FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F B3 A7",
-    "FF 03 80 21 03 13 00 0A 03 06 0A B8 EB F2 B1 5D",
-    "FF 03 80 21 02 14 00 0A 03 06 0A B8 EB F2 74 98",
+    "FF 03 80 21 03 13 00 0A 03 06 0A B1 F4 4F 98 B9",
+    "FF 03 80 21 02 14 00 0A 03 06 0A B1 F4 4F 5D 7C",
+    "FF 03 00 21 45 00 00 4C 50 EA 40 00 3A 11 E6 0A 0A 00 00 AC 0A B1 F4 4F 23 F1 08 00 00 38 50 95 12 80 01 02 88 D7 21 10 17 04 80 83 E0 00 04 81 86 A0 00 02 83 01 02 84 01 45 6E 63 6F 64 69 6E 67 2D 56 65 72 73 69 6F 6E 00 31 2E 32 00 80 90 A1 D6",
     "FF 03 C0 21 06 15 00 04 04 04")
+    // "FF 03 C0 21 01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 26 B4",
+    // "FF 03 C0 21 02 11 00 0A 02 06 00 00 00 00 A5 F0",
+    // "FF 03 C0 23 02 12 00 0D 08 57 65 6C 63 6F 6D 65 21 32 CD",
+    // "FF 03 80 21 01 01 00 0A 03 06 C0 A8 6F 6F B3 A7",
+    // "FF 03 80 21 03 13 00 0A 03 06 0A B8 EB F2 B1 5D",
+    // "FF 03 80 21 02 14 00 0A 03 06 0A B8 EB F2 74 98",
+    // "FF 03 C0 21 06 15 00 04 04 04")
 
   val should_send_list = List[String](
     "FF 03 C0 21 01 11 00 0A 02 06 00 00 00 00 CC 84",
-    "FF 03 C0 21 02 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 D0 47",    
+    "FF 03 C0 21 02 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 D0 47",
     "FF 03 C0 23 01 12 00 06 00 00 0D 80",
     "FF 03 80 21 01 13 00 0A 03 06 00 00 00 00 7D 4C",
     "FF 03 80 21 02 01 00 0A 03 06 C0 A8 6F 6F DA D3",
-    "FF 03 80 21 01 14 00 0A 03 06 0A B8 EB F2 1D EC",
+    "FF 03 80 21 01 14 00 0A 03 06 0A B1 F4 4F 34 08",
+    "FF 03 00 21 45 00 00 2E 23 46 00 00 FF 11 8E CC 0A B1 F4 4F 0A 00 00 AC 08 00 23 F1 00 1A 0A 1F 0A 00 01 02 01 10 0A 00 04 80 83 E0 00 04 81 86 A0 00 1B 47",
+    "FF 03 00 21 45 00 00 1F 23 47 00 00 FF 11 8E DA 0A B1 F4 4F 0A 00 00 AC 08 00 23 F1 00 0B AF 3A 1A 00 01 F6 2D",
+    "FF 03 00 21 45 00 00 24 23 48 00 00 FF 11 8E D4 0A B1 F4 4F 0A 00 00 AC 08 00 23 F1 00 10 E1 86 0A 00 02 00 05 88 D7 21 71 00",
     "FF 03 C0 21 05 15 00 04 C9 21")
+
+    // "FF 03 C0 21 01 11 00 0A 02 06 00 00 00 00 CC 84",
+    // "FF 03 C0 21 02 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 D0 47",    
+    // "FF 03 C0 23 01 12 00 06 00 00 0D 80",
+    // "FF 03 80 21 01 13 00 0A 03 06 00 00 00 00 7D 4C",
+    // "FF 03 80 21 02 01 00 0A 03 06 C0 A8 6F 6F DA D3",
+    // "FF 03 80 21 01 14 00 0A 03 06 0A B8 EB F2 1D EC",
+    // "FF 03 C0 21 05 15 00 04 C9 21")
+
+
+
 
   var should_receive_pointer : Int = 0
   var should_send_pointer : Int = 0
@@ -136,13 +160,22 @@ with ShouldMatchers{
   }
 
   def write_ppp(frame : PppFrame) : Unit = { 
+    // each time ip datagram identifier is randomly generated
+    // and is unimportant in testing
+    def clear_ip_id(bytes : List[Byte]) : Unit = {
+      if(bytes.take(6) == parse_hex("FF 03 00 21 45 00")) // ip datagram
+        bytes.patch(8, parse_hex("00 00"), 2)
+      else
+        bytes
+    }
+
     if(should_send_pointer >= should_send_list.length)
       fail("attempted too many sends")
     else {
       val bytes = should_send_list(should_send_pointer)
       should_send_pointer += 1
-      expect(bytes) {
-        to_hex_string(decode_0x7d_escape(frame.bytes.init.tail))
+      expect(clear_ip_id(parse_hex(bytes))) {
+        clear_ip_id(decode_0x7d_escape(frame.bytes.init.tail))
       }
     }
   }
