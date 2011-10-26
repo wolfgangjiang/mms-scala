@@ -32,51 +32,6 @@ class PppFrameSpecBasic extends Spec with ShouldMatchers {
   }
 }
 
-@RunWith(classOf[JUnitRunner])
-class LcpPacketSpecBasic extends Spec with ShouldMatchers {
-  val config_req = parse_hex("01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23")
-  val terminate_req = parse_hex("05 11 00 06 00 00")
-
-  describe("LcpPacket object") {
-    it("can parse raw bytes in constructor") {
-      val packet = LcpPacket.parse(config_req)
-      packet.code should be (LcpCode.ConfigureRequest)
-      packet.identifier should be (1)
-      packet.length should be (config_req.length)
-      packet.data should be (config_req.drop(4))
-    }
-
-    it("can convert to raw bytes") {
-      val packet = LcpPacket.parse(config_req)
-      packet.bytes should be (config_req)
-    }
-
-    it("can label unknown code as LcpCode.Unknown") {
-      val packet = LcpPacket.parse(0x55.toByte :: config_req.tail)
-      packet.code should be (LcpCode.Unknown)
-    }
-  }
-
-  describe("LcpPacket class") {
-    it("can compose a packet and get raw bytes") {
-      expect(terminate_req) {
-        (new LcpPacket(
-          LcpCode.TerminateRequest, 0x11.toByte, parse_hex("00 00"))).bytes
-      }
-    }
-
-    it("can compose a packet") {
-      val packet = new LcpPacket(
-        LcpCode.TerminateRequest, 0x11.toByte, parse_hex("00 00"))
-      packet.code should be (LcpCode.TerminateRequest)
-      packet.identifier should be (0x11)
-      packet.length should be (terminate_req.length)
-      packet.data should be (parse_hex("00 00"))
-    }
-  }
-}
-
-
 class MockFrameDuplex extends AbstractDuplex
 with ShouldMatchers {
   def say_text(command : String) : Unit = { 
@@ -125,6 +80,53 @@ with ShouldMatchers {
   }
 }
 abstract class MockFrameExpectation { def check(frame : PppFrame) : Unit }
+
+
+
+@RunWith(classOf[JUnitRunner])
+class LcpPacketSpecBasic extends Spec with ShouldMatchers {
+  val config_req = parse_hex("01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23")
+  val terminate_req = parse_hex("05 11 00 06 00 00")
+
+  describe("LcpPacket object") {
+    it("can parse raw bytes in constructor") {
+      val packet = LcpPacket.parse(config_req)
+      packet.code should be (LcpCode.ConfigureRequest)
+      packet.identifier should be (1)
+      packet.length should be (config_req.length)
+      packet.data should be (config_req.drop(4))
+    }
+
+    it("can convert to raw bytes") {
+      val packet = LcpPacket.parse(config_req)
+      packet.bytes should be (config_req)
+    }
+
+    it("can label unknown code as LcpCode.Unknown") {
+      val packet = LcpPacket.parse(0x55.toByte :: config_req.tail)
+      packet.code should be (LcpCode.Unknown)
+    }
+  }
+
+  describe("LcpPacket class") {
+    it("can compose a packet and get raw bytes") {
+      expect(terminate_req) {
+        (new LcpPacket(
+          LcpCode.TerminateRequest, 0x11.toByte, parse_hex("00 00"))).bytes
+      }
+    }
+
+    it("can compose a packet") {
+      val packet = new LcpPacket(
+        LcpCode.TerminateRequest, 0x11.toByte, parse_hex("00 00"))
+      packet.code should be (LcpCode.TerminateRequest)
+      packet.identifier should be (0x11)
+      packet.length should be (terminate_req.length)
+      packet.data should be (parse_hex("00 00"))
+    }
+  }
+}
+
 
 //LcpAutomaton should:
 // send correct req and ack on opening connection
@@ -277,11 +279,15 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
       intercept[SessionTimeoutException] {
         automaton.open
       }
+      id_counter.get_id should be (
+        0x20 + SessionParameters.max_retransmit_times + 2)
+      // "+2" is because there are two "get_id"s that are not retransmit
+      // one is the first send, the other is here
     }
   }
 
   describe("on incoming terminate request") {
-    it("sends a terminate ack and show it is closed by remote") {
+    it("sends a terminate ack and throws a ClosedByRemoteException") {
       val mock_duplex = new MockFrameDuplex
       val terminate_req = new LcpPacket(
         LcpCode.TerminateRequest, 0x99.toByte, Nil)
@@ -296,8 +302,9 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
 
       val id_counter = new PppIdCounter(0x20)
       val automaton = new LcpAutomaton(mock_duplex, id_counter)
-      automaton.open
-      automaton.state should be (LcpState.ClosedByRemote)
+      intercept[ClosedByRemoteException] {
+        automaton.open
+      }
     }
   }
 }

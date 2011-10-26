@@ -17,26 +17,18 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
   describe("remote") {
     // different tests should use different modem ports to 
     // be independent to each other
-    it("is sane") {
-      with_telnet_connection("192.168.10.243", 961) {
-        dpx => {
-          duplex = dpx
-          test_ATZ
-          test_AT_IPR
-          test_dial
-          test_first_incoming_lcp_packet
-        }
-      }
-    }
-
-    // different tests should use different modem ports to 
-    // be independent to each other
     it("works well with local automaton") {
       with_telnet_connection("192.168.10.243", 962) {
         dpx => {
           duplex = dpx
           test_dial
-          test_first_incoming_lcp_packet
+          val ppp_id_counter = new PppIdCounter(0x10)
+          val lcp_automaton = new LcpAutomaton(duplex, ppp_id_counter)
+          lcp_automaton.state should be (LcpState.Closed)
+          lcp_automaton.open
+          lcp_automaton.state should be (LcpState.Ready)
+          lcp_automaton.close
+          lcp_automaton.state should be (LcpState.Closed)
         }
       }
     }
@@ -62,21 +54,6 @@ abstract class RemoteSanitySpec extends AbstractModemSpec {
     response should include ("CONNECT")
     response should include ("~") // 0x7e, PPP数据包的边界标识字符    
   }
-
-  private def test_first_incoming_lcp_packet : Unit = {
-    read_next_frame
-
-    recent_frame.protocol should be(Protocol.LCP)
-    val lcp_packet = recent_frame.payload.asInstanceOf[LcpPacket]
-    lcp_packet.code should be(LcpCode.ConfigureRequest)
-    lcp_packet.identifier should be(1)
-    lcp_packet.data.head should be(1)
-    lcp_packet.data.last should be(0x23)    
-  }
-
-  protected def read_next_frame : Unit = {
-    the_recent_frame = duplex.read_ppp(5*1000L)
-  }
 }
 
 @RunWith(classOf[JUnitRunner])
@@ -94,13 +71,25 @@ trait MockRemote extends AbstractRemote {
   }
 }
 
-class MockDuplex extends AbstractDuplex {
+class MockDuplex extends AbstractDuplex with ShouldMatchers{
   val AT_chat_map = Map("ATZ" -> "OK",
                         "AT+IPR?" -> "+IPR: 115200",
                         "ATD*99***1#" -> "CONNECT 115200\n ~")
 
   private var text_response = ""
-  
+
+  val should_receive_list = List[String](
+    "FF 03 C0 21 01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 26 B4",
+    "FF 03 C0 21 02 11 00 0A 02 06 00 00 00 00 A5 F0",
+    "FF 03 C0 21 06 12 00 04 01 88")
+
+  val should_send_list = List[String](
+    "FF 03 C0 21 01 11 00 0A 02 06 00 00 00 00 CC 84",
+    "FF 03 C0 21 02 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 D0 47",
+    "FF 03 C0 21 05 12 00 04 CC AD")
+
+  var should_receive_pointer : Int = 0
+  var should_send_pointer : Int = 0
 
   def say_text(command : String) : Unit = {
     text_response = AT_chat_map.getOrElse(command, "ERROR")
@@ -113,10 +102,24 @@ class MockDuplex extends AbstractDuplex {
   }
 
   def read_ppp(timeout_millis : Long) : PppFrame = {
-    val raw_frame = parse_hex("FF 03 C0 21 01 01 00 16 01 04 05 DC 02 06 00 00 00 00 07 02 08 02 03 04 C0 23 26 B4")
-
-    PppFrame.parse(encode_0x7d_escape(raw_frame))
+    if(should_receive_pointer >= should_receive_list.length)
+      fail("attempted too many receives")
+    else {
+      val bytes = should_receive_list(should_receive_pointer)
+      should_receive_pointer += 1
+      PppFrame.parse(encode_0x7d_escape(parse_hex(bytes)))
+    }
   }
 
-  def write_ppp(frame : PppFrame) : Unit = { }
+  def write_ppp(frame : PppFrame) : Unit = { 
+    if(should_send_pointer >= should_send_list.length)
+      fail("attempted too many sends")
+    else {
+      val bytes = should_send_list(should_send_pointer)
+      should_send_pointer += 1
+      expect(bytes) {
+        to_hex_string(decode_0x7d_escape(frame.bytes.init.tail))
+      }
+    }
+  }
 }

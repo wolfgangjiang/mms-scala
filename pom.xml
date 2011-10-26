@@ -157,7 +157,7 @@
         <configuration>
           <includes>
             <include>**/*SpecBasic.class</include>
-            <!-- <include>**/*SpecWithActual.class</include> -->
+            <include>**/*SpecWithActual.class</include>
             <include>**/*SpecWithMock.class</include>
           </includes>
         </configuration>

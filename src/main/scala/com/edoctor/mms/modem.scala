@@ -65,9 +65,11 @@ extends AbstractDuplex {
   }
 
   // 阻塞读取，直到读到一个完整的、非空的ppp frame（在两个分界符0x7e之
-  // 间），如果超时，则无论已经读到多少，都返回Nil，即空List。这是因为
-  // 无论已经读到多少，都不是完整的frame。这个空List表示超时。如果是连
-  // 续的两个0x7e之间，这样的空frame会丢弃，不会报错，也不会返回空List。
+  // 间），如果超时，则无论已经读到多少，都返回Protocol.Timeout，这是因
+  // 为无论已经读到多少，都不是完整的frame。如果是连续的两个0x7e之间，
+  // 这样的空frame会丢弃，不会报错，也不会返回空List。这个函数还检查来
+  // 自于远端的lcp terminate request，一旦检查到，就同意关闭连接，并且
+  // 抛出“连接被远端关闭”的异常。
   def read_ppp(timeout_millis : Long) : PppFrame = {
     val start_time = System.currentTimeMillis
 
@@ -83,22 +85,46 @@ extends AbstractDuplex {
           read_with(octet :: data)
         else if(data.isEmpty)
           read_with(data) // silently skip empty frame and continue read
-        else
+        else {
+          // println("received: " + 
+          //         to_hex_string(decode_0x7d_escape(data.reverse)))
           PppFrame.parse(data.reverse)
+        }
       }        
     }
 
-    read_with(Nil)
+    val frame = read_with(Nil)
+    check_terminate_request(frame)
+    frame
   }
 
   def write_ppp(frame : PppFrame) : Unit = {
+    // println("sent: " + 
+    //         to_hex_string(decode_0x7d_escape(frame.bytes.init.tail)))
     out_s.write(frame.bytes.toArray)
     out_s.flush
+  }
+
+  // this works like a before filter in Ruby on Rails
+  // further process is prevented if some condition is met
+  // (in this case, if receiving a terminate request)
+  private def check_terminate_request(frame : PppFrame) : Unit = {
+    if(frame.protocol == Protocol.LCP) {
+      val incoming_packet = frame.payload.asInstanceOf[LcpPacket]
+      if(incoming_packet.code == LcpCode.TerminateRequest) {
+        val ack_packet = new LcpPacket(
+          LcpCode.TerminateAck, incoming_packet.identifier, Nil)
+        val ack_frame = new PppFrame(Protocol.LCP, ack_packet)
+        write_ppp(ack_frame)
+        throw new ClosedByRemoteException
+      }
+    }
   }
 }
 
 class SessionTimeoutException extends RuntimeException
 class InvalidComposeException extends RuntimeException
+class ClosedByRemoteException extends RuntimeException
 
 case class PppFrame(protocol : Protocol,
                     payload : FramePayload) {
@@ -242,7 +268,6 @@ object LcpState {
   object AckRcvd extends LcpState  
   object Ready extends LcpState
   object Closing extends LcpState
-  object ClosedByRemote extends LcpState
 }
 
 object LcpPacket {
@@ -318,7 +343,8 @@ class LcpAutomaton(val duplex : AbstractDuplex,
   val get_closed_by_remote_action = new LcpAction { 
     def perform : Unit = {
       send_terminate_ack
-      the_state = ClosedByRemote      
+      the_state = Closed
+      throw new ClosedByRemoteException
     }
   }
   val retransmit_action = new LcpAction {
@@ -348,54 +374,40 @@ class LcpAutomaton(val duplex : AbstractDuplex,
     LcpCode.TerminateAck -> ReceiveTerminateAck)
   
   val state_transition_table = Map(  
-    (Closed, OpenConnection) -> new LcpAction {
-      def perform : Unit = {
+    (Closed, OpenConnection) -> new LcpAction { def perform : Unit = {
         initialize_retransmit_counter
         send_config_request
         the_state = ReqSent
         read_from_remote
-      }
-    },
-    (ReqSent, ReceiveConfigReq) -> new LcpAction {
-      def perform : Unit = {
+    }},
+    (ReqSent, ReceiveConfigReq) -> new LcpAction { def perform : Unit = {
         send_config_ack
         the_state = AckSent
         read_from_remote
-      }
-    },
-    (ReqSent, ReceiveConfigAck) -> new LcpAction {
-      def perform : Unit = {
+    }},
+    (ReqSent, ReceiveConfigAck) -> new LcpAction { def perform : Unit = {
         initialize_retransmit_counter
         the_state = AckRcvd
         read_from_remote
-      }
-    },
-    (AckSent, ReceiveConfigAck) -> new LcpAction {
-      def perform : Unit = {
+    }},
+    (AckSent, ReceiveConfigAck) -> new LcpAction { def perform : Unit = {
         initialize_retransmit_counter
         the_state = Ready
-      }
-    },
-    (AckRcvd, ReceiveConfigReq) -> new LcpAction {
-      def perform : Unit = {
+    }},
+    (AckRcvd, ReceiveConfigReq) -> new LcpAction { def perform : Unit = {
         initialize_retransmit_counter
         send_config_ack
         the_state = Ready
-      }
-    },
-    (Ready, CloseConnection) -> new LcpAction {
-      def perform : Unit = {
+    }},
+    (Ready, CloseConnection) -> new LcpAction { def perform : Unit = {
         initialize_retransmit_counter
         send_terminate_req
         the_state = Closing
         read_from_remote
-      }
-    },
-    (Closing, ReceiveTerminateAck) -> new LcpAction {
-      def perform : Unit = {
+    }},
+    (Closing, ReceiveTerminateAck) -> new LcpAction { def perform : Unit = {
         the_state = Closed
-      }
-    },
+    }},
     (ReqSent, SoftTimeout) -> retransmit_action,
     (AckSent, SoftTimeout) -> retransmit_action,
     (AckRcvd, SoftTimeout) -> retransmit_action,
@@ -449,7 +461,7 @@ class LcpAutomaton(val duplex : AbstractDuplex,
         the_recent_received_packet = packet
         this.feed_event(packet_driven_events(packet.code))
       }
-    }    
+    }
   }
 
   def initialize_retransmit_counter : Unit = {
