@@ -91,6 +91,8 @@ trait MockRemote extends AbstractRemote {
 class MockDuplex 
 extends AbstractDuplex(SessionParameters.initial_ppp_id) 
 with ShouldMatchers{
+  override def name = "Mock"
+
   val AT_chat_map = Map("ATZ" -> "OK",
                         "AT+IPR?" -> "+IPR: 115200",
                         "ATD*99***1#" -> "CONNECT 115200\n ~")

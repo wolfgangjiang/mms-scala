@@ -317,7 +317,7 @@ class WspAutomatonSpecBasic extends Spec with ShouldMatchers {
     }
     
     describe("when sending mms") {
-      it("retransmits when timeout") {
+      it("does not retransmit when timeout") {
         val mock_duplex = make_mock_duplex
         val ppp_mock_duplex = get_ppp_mock(mock_duplex)
 
@@ -326,12 +326,23 @@ class WspAutomatonSpecBasic extends Spec with ShouldMatchers {
         ppp_mock_duplex.produce(ppp_mock_duplex.default_timeout_frame)
         ppp_mock_duplex.produce(ppp_mock_duplex.default_timeout_frame)
         ppp_mock_duplex.produce(new PppFrame(Protocol.IP, dummy_reply))
+        /*
         (1 to 3).foreach( _ =>
           ppp_mock_duplex.check( frame => { 
             val data = extract_wtp(frame)
             WtpHeader.get_wtp_pdu_type(data) should be (WtpPduType.Invoke)
           })) // post invoke
+          */
 
+        ppp_mock_duplex.check( frame => { 
+          val data = extract_wtp(frame)
+          WtpHeader.get_wtp_pdu_type(data) should be (WtpPduType.Invoke)
+        })
+        ppp_mock_duplex.check( frame => {
+          val data = extract_wtp(frame)
+          WtpHeader.get_wtp_pdu_type(data) should not be (WtpPduType.Invoke)
+        })
+        
         val wsp_automaton = new WspAutomaton(mock_duplex)
         wsp_automaton.set_state(WspState.Connected)
         wsp_automaton.send_mms(parse_hex("00 00"))

@@ -34,6 +34,8 @@ class PppFrameSpecBasic extends Spec with ShouldMatchers {
 
 class MockFrameDuplex(initial_id : Int) 
 extends AbstractDuplex(initial_id) with ShouldMatchers {
+  override def name = "MockFrame"
+
   private var i_am_satisfied = false
   def satisfied = (expectations.isEmpty || i_am_satisfied)
 

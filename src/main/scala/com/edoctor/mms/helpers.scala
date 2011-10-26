@@ -111,7 +111,7 @@ object SessionParameters {
 
   // request_timeout仅用于config-request和terminal-request的应答超时判
   // 定，以毫秒为单位。
-  val request_timeout_interval : Long = 5*1000L 
+  val request_timeout_interval : Long = 15*1000L 
 
   val max_retransmit_times = 3
 

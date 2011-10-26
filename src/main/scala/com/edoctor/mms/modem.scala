@@ -18,7 +18,8 @@ trait ActualRemote extends AbstractRemote {
     val tc = new org.apache.commons.net.telnet.TelnetClient
     try {
       tc.connect(modem_ip, modem_port)
-      block(new ActualDuplex(tc.getInputStream, tc.getOutputStream))
+      block(new ActualDuplex(tc.getInputStream, tc.getOutputStream,
+                             modem_ip + ":" + modem_port.toString))
     } finally {
       try {
         tc.disconnect
@@ -35,6 +36,7 @@ abstract class AbstractDuplex(initial_id : Int) {
   def listen_text(timeout_millis : Long) : String
   def read_ppp(timeout_millis : Long) : PppFrame
   def write_ppp(frame : PppFrame) : Unit
+  def name : String
 
   private var id_counter : Int = initial_id
   def get_ppp_id : Byte = { // 它只有1个字节。
@@ -50,7 +52,8 @@ abstract class AbstractDuplex(initial_id : Int) {
 // and throw an "ClosedByRemoteException" to indicate total failure.
 // this class is not covered by mocked unit tests
 class ActualDuplex(val in_s : java.io.InputStream,
-                   val out_s : java.io.OutputStream)
+                   val out_s : java.io.OutputStream,
+                   override val name : String)
 extends AbstractDuplex(initial_ppp_id) {
   def say_text(command : String) : Unit = {
     out_s.write((command + "\r").getBytes)
@@ -102,8 +105,8 @@ extends AbstractDuplex(initial_ppp_id) {
         else if(data.isEmpty)
           read_with(data) // silently skip empty frame and continue read
         else {
-          println("received: " + 
-                  to_hex_string(decode_0x7d_escape(data.reverse)))
+          Log.bytes(name,
+            "received: " + to_hex_string(decode_0x7d_escape(data.reverse)))
           PppFrame.parse(data.reverse)
         }
       }        
@@ -115,8 +118,8 @@ extends AbstractDuplex(initial_ppp_id) {
   }
 
   def write_ppp(frame : PppFrame) : Unit = {
-    println("sent: " + 
-            to_hex_string(decode_0x7d_escape(frame.bytes.init.tail)))
+    Log.bytes(name, 
+      "sent: " + to_hex_string(decode_0x7d_escape(frame.bytes.init.tail)))
     out_s.write(frame.bytes.toArray)
     out_s.flush
   }
@@ -143,6 +146,7 @@ class InvalidComposeException extends RuntimeException
 class ClosedByRemoteException extends RuntimeException
 class AuthenticateFailureException extends RuntimeException
 class MalformedIpAddressException extends RuntimeException
+class DialFailedException extends RuntimeException
 
 // =============================
 // PPP protocol
@@ -477,12 +481,14 @@ class LcpAutomaton(val duplex : AbstractDuplex) {
         this.feed_event(SoftTimeout)
       } else this.feed_event(HardTimeout)
     } else if(frame.protocol != Protocol.LCP) {
+      Log.warn_unhandled_packet(duplex.name, frame.bytes)
       read_from_remote                // silently discard this frame
     } else {
       val packet = frame.payload.asInstanceOf[LcpPacket]
-      if(packet.code == LcpCode.Unknown)
+      if(packet.code == LcpCode.Unknown) {
+        Log.warn_unhandled_packet(duplex.name, frame.bytes)
         read_from_remote              // silently discard this frame
-      else {
+      } else {
         the_recent_received_packet = packet
         this.feed_event(packet_driven_events(packet.code))
       }
@@ -622,17 +628,20 @@ class PapAutomaton(val duplex : AbstractDuplex) {
       else
         throw new SessionTimeoutException  // hard timeout
     }
-    else if(frame.protocol != Protocol.PAP) // and not timeout yet
+    else if(frame.protocol != Protocol.PAP) {// and not timeout yet
+      Log.warn_unhandled_packet(duplex.name, frame.bytes)
       read_from_remote_and_process // silently discard
-    else {
+    } else {
       val packet = frame.payload.asInstanceOf[PapPacket]
       if(packet.code == PapCode.AuthenticateAck) {
         // success, do nothing and return without incident
       }
       else if(packet.code == PapCode.AuthenticateNak)
         throw new AuthenticateFailureException
-      else
+      else {
+        Log.warn_unhandled_packet(duplex.name, frame.bytes)
         read_from_remote_and_process // silently discard
+      }
     }
   }
 
@@ -767,9 +776,10 @@ class IpcpAutomaton(val duplex : AbstractDuplex) {
       else
         throw new SessionTimeoutException  // hard timeout      
     } 
-    else if(frame.protocol != Protocol.IPCP)  // but not timeout
+    else if(frame.protocol != Protocol.IPCP) { // but not timeout
+      Log.warn_unhandled_packet(duplex.name, frame.bytes)
       read_from_remote_and_process      // silently discard
-    else {
+    } else {
       val packet = frame.payload.asInstanceOf[IpcpPacket]
       recent_received_packet = packet
       if(packet.code == IpcpCode.ConfigureRequest) {
@@ -959,6 +969,8 @@ class UdpDuplex(val ppp_duplex : AbstractDuplex,
                 val remote_port : Int) {
   // IP id counter has 2 bytes, its initial value should be random
   private var id_counter : Int = (math.random * 40000).toInt
+
+  def name = ppp_duplex.name
 
   def get_id : Int = {
     id_counter += 1
@@ -1280,7 +1292,8 @@ class WspAutomaton(val duplex : UdpDuplex) {
       the_state = Connected
     }},
     (DataSent, SoftTimeout) -> new WspAction { def perform : Unit = {
-      send_data
+      // we do not retransmit, or may send duplicate messages due to 
+      // too late response of remote.
       retransmit_counter -= 1
       read_from_remote
     }},
@@ -1302,9 +1315,10 @@ class WspAutomaton(val duplex : UdpDuplex) {
           feed_event(SoftTimeout)
         else
           feed_event(HardTimeout)
-      }
-      else
+      } else {
+        Log.error(duplex.name, response.left.get)
         read_from_remote // silently discard
+      }
     } 
     else {
       val data = response.right.get
@@ -1327,12 +1341,15 @@ class WspAutomaton(val duplex : UdpDuplex) {
       else if(WtpHeader.get_wtp_pdu_type(data) == WtpPduType.Ack) {
         feed_event(AckRcvd) 
       }
-      else
+      else {
+        Log.warn_unhandled_packet(duplex.name, data)
         read_from_remote // silently discard
+      }
     }
   }
 
   def feed_event(event : WspEvent) : Unit = {
+    Log.debug(duplex.name, event.toString)
     val action = if(event == HardTimeout) {
       hard_timeout_action
     } else if(!(state_transition_table contains (state, event))) {
