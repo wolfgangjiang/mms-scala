@@ -140,26 +140,6 @@ class WapSpecBasic extends Spec with ShouldMatchers {
     }
   }
 
-  val example_mms_bytes = parse_hex("8C 80 98 30 30 30 31 00 8D 81 89 11 80 2B 38 36 31 35 30 30 30 30 32 37 39 34 34 35 00 97 2B 38 36 31 33 31 32 32 37 34 37 36 30 35 2F 54 59 50 45 3D 50 4C 4D 4E 00 96 20 E5 BD A9 E4 BF A1 E6 B5 8B E8 AF 95 00 8A 80 8F 80 84 A3 01 04 0D 03 83 81 EA 20 E6 B5 8B E8 AF 95 E6 96 87 E6 9C AC")
-
-  describe("tambur mms package") {
-    import net.tambur.mms.{ MMMessage, MMConstants }
-    it("composes a mms message") {
-      val msg = new MMMessage
-      msg.setMessageType(MMConstants.MESSAGE_TYPE_M_SEND_REQ)
-      msg.setTransactionId("0001")
-      msg.setFrom("+86150000279445")
-      msg.setTo("+86" + "13122747605" + "/TYPE=PLMN")
-      msg.setSubject(" " + "彩信测试")
-      msg.setVersion(1)
-      msg.setContentType("application/vnd.wap.multipart.mixed")
-      msg.addPart("text/plain; charset=\"utf-8\"", (" " + "测试文本").getBytes("utf-8"), false, null, null)
-      val bytes : List[Byte] = msg.encode.toList
-
-      bytes should be (example_mms_bytes)
-    }
-  }
-
   describe("data fragmentation") {
     import SessionParameters.wtp_max_transmit_unit_size
     import WtpHeader.get_ttr
