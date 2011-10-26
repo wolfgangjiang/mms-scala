@@ -92,7 +92,7 @@ object MmsPdu {
       0x89.toByte :: encode_zero_terminate_string("application/smil")
     // 0x89 == 0x80 + 0x09 == Wellknown Parameter: Type(for related only)
     val length = start_bytes.length + type_bytes.length + 1
-    // "+1" means the fourth_byte
+    // "+1" means the content_type_byte
 
     List(List(first_byte, second_byte),
          int_to_uintvar(length),
@@ -124,45 +124,62 @@ object MmsPdu {
     // for now we only provide functionality of normal priority
   }
 
-  def encode_part_text(data : List[Byte]) : List[Byte] = {
-    val header = parse_hex("03 83 81 EA") 
-    // 0x03 == what? maybe content type length ?
-    // 0x83 == 0x80 + 0x03 == "text/plain", 
+  def encode_part_text(data : List[Byte], name : String) : List[Byte] = {
+    val content_type = parse_hex("03 83 81 EA")
+    // 0x03 == length of content_type
+    // 0x83 == 0x80 + 0x03 == "text/plain"
     // 0x81 == 0x80 + 0x01 == charset indicator
     // 0xEA == 0x80 + 0x6A == utf-8 (well known charsets)
+    val path_parameter = 0x8E.toByte :: encode_zero_terminate_string(name)
+    // 0x8E == 0x80 + 0x0E == Content-Location
+    val header = content_type ++ path_parameter
     val headers_len = int_to_uintvar(header.length)
-    val data_len = int_to_uintvar(data.length)
+    val true_data = 0x20.toByte :: data 
+    // append a space char to the front of data string, to ensure
+    // chinese characters can be correctly displayed on some mobile phones.
+    val data_len = int_to_uintvar(true_data.length)
     
     List(headers_len,
          data_len,
          header,
-         data).flatten
+         true_data).flatten
   }
   
   def encode_part_smil(data : List[Byte]) : List[Byte] = {
-    val content_type = encode_zero_terminate_string("application/smil")
-    val additional_header = 
+    val charset_parameter = parse_hex("81 83")
+    // 0x81 = 0x01 + 0x80 = charset
+    // 0x83 = 0x03 + 0x80 = us-ascii
+    val content_type = 
+      encode_zero_terminate_string("application/smil") ++ charset_parameter
+    val content_id_header = 
       0xC0.toByte :: encode_zero_terminate_string("\"<index.smil>")
     // 0xC0 == 0x80 + 0x40 == Content-ID
     // there should be only one quote as the first char, 
     // without closing quote
     val headers_len = int_to_uintvar(
-      content_type.length + additional_header.length)
+      content_type.length + content_id_header.length + 1)
+    // +1 == content_type_length.length
     val data_len = int_to_uintvar(data.length)
 
     List(headers_len, 
          data_len,
+         int_to_uintvar(content_type.length),
          content_type,
-         additional_header,
+         content_id_header,
          data).flatten
   }
 
   def encode_part_image(data : List[Byte], name : String,
                         content_type_byte : Byte) : List[Byte] = {
     val name_parameter = 0x85.toByte :: encode_zero_terminate_string(name)
+    // 0x85 == 0x80 + 0x05 == name parameter
+    val path_header = 0x8E.toByte :: encode_zero_terminate_string(name)
+    // 0x8E == 0x80 + 0x0E == Content-Location
     val content_type_len = name_parameter.length + 1
-    // content_type.length == 1
-    val headers_len = int_to_uintvar(content_type_len + 1)
+    // content_type_byte.length == 1
+    val headers_len = int_to_uintvar(content_type_len + 
+                                     path_header.length + 
+                                     1)
     // headers_len = content_type_len + length(content_type_len_byte)
     val data_len = int_to_uintvar(data.length)
 
@@ -171,6 +188,7 @@ object MmsPdu {
          int_to_uintvar(content_type_len),
          List(content_type_byte),
          name_parameter,
+         path_header,
          data).flatten
   }
 
@@ -192,7 +210,7 @@ object MmsPdu {
   def encode_pdu_header(title : String, to : String) : List[Byte] = {
     List(encode_message_type(MessageType.M_send_req),
          encode_transaction_id("0001"),
-         encode_version(1, 2),
+         encode_version(1, 1),
          encode_sender("+8615000279445/TYPE=PLMN"),
          encode_receiver("+86" + to + "/TYPE=PLMN"),
          encode_subject(title),
@@ -202,16 +220,16 @@ object MmsPdu {
   }
 
   def encode_part(part : MmsRequestPart) : List[Byte] = {
-      if(part.ext == "jpg" || part.ext == "jpeg")
-        encode_part_jpeg(part.data_bytes, part.name)
-      else if(part.ext == "gif")
-        encode_part_gif(part.data_bytes, part.name)
-      else if(part.ext == "png")
-        encode_part_png(part.data_bytes, part.name)
-      else if(part.ext == "smil")
-        encode_part_smil(part.data_bytes)
-      else
-        encode_part_text(part.data_bytes)
+    if(part.ext == "jpg" || part.ext == "jpeg")
+      encode_part_jpeg(part.data_bytes, part.name)
+    else if(part.ext == "gif")
+      encode_part_gif(part.data_bytes, part.name)
+    else if(part.ext == "png")
+      encode_part_png(part.data_bytes, part.name)
+    else if(part.ext == "smil")
+      encode_part_smil(part.data_bytes)
+    else
+      encode_part_text(part.data_bytes, part.name)
   }
 
   def compose(request : MmsRequest) : List[Byte] = {
@@ -237,8 +255,8 @@ class MmsRequestPart {
   }
 
   def ext = 
-    if(data_or_url == null) ""
-    else data_or_url.split("\\.").toList.last
+    if(name == null) ""
+    else name.split("\\.").toList.last
 
   // 刚刚从json转化来的时候，the_data_bytes为空。
   // 如果是已知的二进制类型，则应该下载，认为是url，
@@ -291,4 +309,80 @@ class MmsRequest {
   val title : String = null
   val to : String = null
   val parts : Array[MmsRequestPart] = null
+}
+
+object App extends ActualRemote {
+  import SessionHelpers._
+
+  def main(args : Array[String]) : Unit = {
+    val mms_bytes = my_compose
+    send(mms_bytes)
+    println("FINISHED")
+  }
+
+  def my_compose : List[Byte] = {
+    val smil = io.Source.fromFile("test_assets/index.smil").mkString
+    val gson = new com.google.gson.Gson
+    val smil_json = gson.toJson(smil)
+    val request_json = io.Source.fromFile("test_assets/k.json").mkString.replace("%INDEX.SMIL%", smil_json)
+
+    val request = MmsPdu.parse_request(request_json)
+    if(request.isLeft) {
+      println(request.left.get)
+      sys.exit(-1)
+    }
+    println(request.right.get.parts.head.data_or_url)
+    MmsPdu.compose(request.right.get)
+  }
+
+  def example_compose : List[Byte] = {
+    def get_from_file(filename : String) : List[Byte] = {
+      import java.io._
+      val file = new File(filename)
+      val len = file.length.toInt
+      val fstream = new FileInputStream(file)
+      val dstream = new DataInputStream(fstream)
+      val byte_array = Array.ofDim[Byte](len)
+      dstream.readFully(byte_array)
+      byte_array.toList
+    }
+    val new_receiver = 0x97.toByte +: "13122747605".getBytes.toList :+ 0.toByte
+    val header = parse_hex("8C 80 98 30 30 30 31 00 8D 81 89 11 80 2B 38 36 31 35 30 30 30 30 32 37 39 34 34 35 00 97 2B 38 36 31 33 31 32 32 37 34 37 36 30 35 2F 54 59 50 45 3D 50 4C 4D 4E 00 96 20 E5 BD A9 E4 BF A1 E6 B5 8B E8 AF 95 00 8A 80 8F 80")
+    val result = header ++ get_from_file("../example_mmspdu.mms").drop(116)
+    println(to_hex_string(result.slice(32, 59)))
+    // sys.exit(0)
+    result
+  }
+
+  def send(mms_bytes : List[Byte]) = {
+    with_telnet_connection("192.168.10.243", 961) { duplex => {
+      dial(duplex)
+      val lcp_automaton = new LcpAutomaton(duplex)
+      lcp_automaton.open
+      val pap_automaton = new PapAutomaton(duplex)
+      pap_automaton.authenticate
+      val ipcp_automaton = new IpcpAutomaton(duplex)
+      val our_ip_addr = ipcp_automaton.get_ip
+      val udp_duplex = new UdpDuplex(
+        duplex,
+        our_ip_addr,
+        SessionParameters.our_port,
+        SessionParameters.wap_proxy_ip_addr,
+        SessionParameters.wap_proxy_port)
+      val wsp_automaton = new WspAutomaton(udp_duplex)
+      wsp_automaton.connect
+      wsp_automaton.send_mms(mms_bytes)
+      wsp_automaton.disconnect
+      lcp_automaton.close
+    }}    
+  }
+
+  def dial(duplex : AbstractDuplex) : Unit = {
+    duplex.say_text("ATD*99***1#")
+    val response = duplex.listen_text(500L)
+    if(!(response containsSlice "CONNECT")) {
+      println("ERROR: dial failed")
+      sys.exit(-1)
+    }
+  }
 }

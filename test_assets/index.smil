@@ -1,0 +1,19 @@
+<smil xmlns="http://www.w3.org/2000/SMIL20/CR/Language">
+  <head>
+    <layout>
+      <root-layout height="208" width="176" backgroundColor="yellow" />
+      <region id="Up" height="70%" width="100%" left="0%" top="30%" fit="scroll" />
+      <region id="Down" height="30%" width="100%" left="0%" top="0%" fit="scroll" />
+    </layout>
+  </head>
+  <body>
+    <par dur="6s">
+      <text src="k1.txt" region="Up" />
+      <img src="k.gif" region="Down" />
+    </par>
+    <par dur="6s">
+      <img src="k.gif" region="Up" />
+      <text src="k2.txt" region="Down" />
+    </par>
+  </body>
+</smil>

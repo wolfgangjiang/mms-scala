@@ -3,7 +3,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.edoctor.mms</groupId>
   <artifactId>mms</artifactId>
-  <version>0.1</version>
+  <version>2.0</version>
   <inceptionYear>2011</inceptionYear>
   <properties>
     <scala.version>2.9.0-1</scala.version>
@@ -85,7 +85,7 @@
        <dependency>
           <groupId>com.google.code.gson</groupId>
           <artifactId>gson</artifactId>
-          <version>1.4</version>
+          <version>1.7.1</version>
         </dependency>
  
 
@@ -126,6 +126,7 @@
           <scalaVersion>${scala.version}</scalaVersion>
           <args>
             <arg>-target:jvm-1.5</arg>
+            <arg>-deprecation</arg>
           </args>
         </configuration>
       </plugin>

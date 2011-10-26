@@ -1,0 +1,7 @@
+{ title: "测试", to: "13122747605",
+  parts: [
+    { name: "k.gif", data_or_url: "http://i.e-doctor.cn/system/tweet_photos/2011/8/10/original/f09c043db2658753c7c6d05a98d43728bf61d2f7.gif" },
+    { name: "k1.txt", data_or_url: "第一页的内容" }, 
+    { name: "k2.txt", data_or_url: "第二页的内容" },
+    { name: "index.smil", data_or_url: %INDEX.SMIL% }
+]}

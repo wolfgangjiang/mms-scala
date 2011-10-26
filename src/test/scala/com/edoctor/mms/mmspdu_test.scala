@@ -82,6 +82,9 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
       expect(parse_hex("84 1f 1f b3 8a 3c 62 69 67 2e 73 6d 69 6c 3e 00 89 61 70 70 6c 69 63 61 74 69 6f 6e 2f 73 6d 69 6c 00")) {
         encode_multipart_related("big.smil")
       }
+      expect(parse_hex("84 1F 20 B3 8A 3C 73 75 64 6F 2E 73 6D 69 6C 3E 00 89 61 70 70 6C 69 63 61 74 69 6F 6E 2F 73 6D 69 6C 00")) {
+        encode_multipart_related("sudo.smil")
+      }
     }
     it("encodes multipart-mixed content type") {
       expect(parse_hex("84 A3")) {
@@ -106,13 +109,13 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
   describe("MmsPdu part encoders") {
     import MmsPdu._
     it("encodes text/plain in utf-8") {
-      expect(parse_hex("04 0D 03 83 81 EA 20 E6 B5 8B E8 AF 95 E6 96 87 E6 9C AC")) {
-        encode_part_text((" " + "测试文本").getBytes.toList)
+      expect(parse_hex("0B 0D 03 83 81 EA 8E 6B 2E 74 78 74 00 20 E6 B5 8B E8 AF 95 E6 96 87 E6 9C AC")) {
+        encode_part_text("测试文本".getBytes.toList, "k.txt")
       }
     }
 
     it("encodes smil file as index.smil") {
-      expect(parse_hex("20 0D 61 70 70 6C 69 63 61 74 69 6F 6E 2F 73 6D 69 6C 00 C0 22 3C 69 6E 64 65 78 2E 73 6D 69 6C 3E 00 3C 73 6D 69 6C 3E 3C 2F 73 6D 69 6C 3E")) {
+      expect(parse_hex("23 0D 13 61 70 70 6C 69 63 61 74 69 6F 6E 2F 73 6D 69 6C 00 81 83 C0 22 3C 69 6E 64 65 78 2E 73 6D 69 6C 3E 00 3C 73 6D 69 6C 3E 3C 2F 73 6D 69 6C 3E")) {
         encode_part_smil(("<smil></smil>").getBytes.toList)
       }
     }
@@ -124,7 +127,7 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
 
       val part_gif = encode_part_gif(gif_pic, "k.gif")
       part_gif.takeRight(gif_pic.length) should be (gif_pic)
-      expect(parse_hex("09 2D 08 9D 85 6B 2E 67 69 66 00")) {
+      expect(parse_hex("10 2D 08 9D 85 6B 2E 67 69 66 00 8E 6B 2E 67 69 66 00")) {
         part_gif.dropRight(gif_pic.length)
       }      
     }
@@ -136,7 +139,7 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
 
       val part_jpg = encode_part_jpeg(jpg_pic, "k.jpg")
       part_jpg.takeRight(jpg_pic.length) should be (jpg_pic)
-      expect(parse_hex("09 81 20 08 9E 85 6B 2E 6A 70 67 00")) {
+      expect(parse_hex("10 81 20 08 9E 85 6B 2E 6A 70 67 00 8E 6B 2E 6A 70 67 00")) {
         part_jpg.dropRight(jpg_pic.length)
       }
     }
@@ -148,7 +151,7 @@ class MmsPduSpecBasic extends Spec with ShouldMatchers {
 
       val part_png = encode_part_png(png_pic, "k.png")
       part_png.takeRight(png_pic.length) should be (png_pic)
-      expect(parse_hex("09 82 1C 08 A0 85 6B 2E 70 6E 67 00")) {
+      expect(parse_hex("10 82 1C 08 A0 85 6B 2E 70 6E 67 00 8E 6B 2E 70 6E 67 00")) {
         part_png.dropRight(png_pic.length)
       }
     }
