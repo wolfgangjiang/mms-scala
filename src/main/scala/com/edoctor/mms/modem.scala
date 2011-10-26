@@ -215,6 +215,16 @@ object PppFrame {
   }
 }
 
+class PppIdCounter(initial : Int) {
+  private var counter : Int = initial 
+  def get_id : Byte = { // 它只有1个字节。
+    counter += 1
+    if(counter > 0x30)
+      counter = 0x10
+    counter.toByte
+  }
+}
+
 sealed abstract class LcpCode
 object LcpCode {
   case object ConfigureRequest extends LcpCode
@@ -278,7 +288,8 @@ class LcpPacket(val code : LcpCode,
   }
 }
 
-class LcpAutomaton(val duplex : AbstractDuplex) {
+class LcpAutomaton(val duplex : AbstractDuplex, 
+                   val id_counter : PppIdCounter) {
   import LcpState._
 
   sealed abstract class LcpEvent
@@ -314,6 +325,8 @@ class LcpAutomaton(val duplex : AbstractDuplex) {
     def perform : Unit = {
       if(recent_sent_packet != null)
         send_packet(recent_sent_packet)
+      retransmit_counter -= 1
+      read_from_remote
     }
   }
   val hard_timeout_action = new LcpAction {
@@ -367,6 +380,7 @@ class LcpAutomaton(val duplex : AbstractDuplex) {
     },
     (Ready, CloseConnection) -> new LcpAction {
       def perform : Unit = {
+        initialize_retransmit_counter
         send_terminate_req
         the_state = Closing
         read_from_remote
@@ -384,9 +398,13 @@ class LcpAutomaton(val duplex : AbstractDuplex) {
   )
 
   def state = the_state
-  def set_state(s : LcpState) : Unit = { the_state = s } // for testing
   def recent_received_packet = the_recent_received_packet
   def recent_sent_packet = the_recent_sent_packet
+
+  def set_state(s : LcpState) : Unit = { // for testing
+    the_state = s 
+  } 
+
 
   def feed_event(event : LcpEvent) : Unit = {
     val action = if(event == ReceiveTerminateReq) {
@@ -415,7 +433,6 @@ class LcpAutomaton(val duplex : AbstractDuplex) {
     if(frame.protocol == Protocol.Timeout) {
       if(retransmit_counter > 0) {
         this.feed_event(SoftTimeout)
-        retransmit_counter -= 1
       } else this.feed_event(HardTimeout)
     } else if(frame.protocol != Protocol.LCP) {
       read_from_remote                // silently discard this frame

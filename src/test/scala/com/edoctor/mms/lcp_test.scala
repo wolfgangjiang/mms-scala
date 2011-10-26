@@ -84,8 +84,8 @@ class LcpPacketSpecBasic extends Spec with ShouldMatchers {
 // respond correctly to terminate request
 // show correct state when asked whether is ready or other 
 
-abstract class MockBinaryDuplex extends AbstractDuplex 
-with org.scalatest.Assertions {
+class MockFrameDuplex extends AbstractDuplex
+with ShouldMatchers {
   def say_text(command : String) : Unit = { 
     fail("should not call say_text()")
   }
@@ -94,14 +94,44 @@ with org.scalatest.Assertions {
     fail("should not call listen_text()")
   }
 
-  def read_ppp(timeout_millis : Long) : PppFrame = {
-    fail("should not call read_ppp()")
+  val default_timeout_frame = new PppFrame(
+    Protocol.Timeout, new ErrorMessage("default timeout frame in mock"))
+
+  private var inputs : List[PppFrame] = Nil
+  private var expectations : List[MockFrameExpectation] = Nil
+  private var read_count = 0
+  private var write_count = 0
+
+  override def read_ppp(timeout_millis : Long) : PppFrame = {
+    val result = if(read_count < inputs.length)
+      inputs(read_count)
+    else
+      default_timeout_frame
+    
+    read_count += 1
+
+    result
   }
 
-  def write_ppp(frame : PppFrame) : Unit = {
-    fail("should not call write_ppp()")
+  override def write_ppp(frame : PppFrame) : Unit = {
+    if(write_count < expectations.length)
+      expectations(write_count).check(frame)
+    // else do nothing
+    write_count += 1
+  }
+
+  def produce(frame : PppFrame) : Unit = {
+    inputs = inputs :+ frame
+  }
+
+  def check(block : PppFrame => Unit) : Unit = {
+    val checker = new MockFrameExpectation { 
+      def check(frame : PppFrame) : Unit = block
+    }
+    expectations = expectations :+ checker
   }
 }
+abstract class MockFrameExpectation { def check(frame : PppFrame) : Unit }
 
 @RunWith(classOf[JUnitRunner])
 class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
@@ -109,166 +139,144 @@ class LcpAutomatonSpecBasic extends Spec with ShouldMatchers {
     Protocol.Timeout, new ErrorMessage("default timeout frame in mock"))
   val test_config_req_options = parse_hex("03 04 C0 23")
 
+  private def extract_lcp(frame : PppFrame) : LcpPacket = {
+    frame.protocol should be (Protocol.LCP)
+    frame.payload.asInstanceOf[LcpPacket]
+  }
 
-  describe("chat correctly on opening connection") {
+  describe("on opening connection") {
     it("sends a config-req when told to open") {
-      val mock_duplex = new MockBinaryDuplex {
-        override def read_ppp(timeout_millis : Long) : PppFrame = {
-          default_timeout_frame
-        }
+      val mock_duplex = new MockFrameDuplex 
 
-        override def write_ppp(frame : PppFrame) : Unit = {
-          frame.protocol should be(Protocol.LCP)
-          val packet = frame.payload.asInstanceOf[LcpPacket]
-          packet.code should be (LcpCode.ConfigureRequest)
-          packet.data should be (
-            SessionParameters.our_lcp_config_req_options)
-        }
+      mock_duplex.check(frame => {
+        val packet = extract_lcp(frame)
+        packet.code should be (LcpCode.ConfigureRequest)
+        packet.identifier should be (0x11)
+        packet.data should be (
+          SessionParameters.our_lcp_config_req_options)
+      })        
+
+      val id_counter = new PppIdCounter(0x10)
+      val automaton = new LcpAutomaton(mock_duplex, id_counter)
+      intercept[SessionTimeoutException] {
+        automaton.open
       }
-
-      val automaton = new LcpAutomaton(mock_duplex)
-      automaton.open
     }
 
     it("sends a corresponding config-ack if receives a config-req") {
-      val mock_duplex = new MockBinaryDuplex {
-        private var time_to_call_write_ppp = 0
-        
-        override def read_ppp(timeout_millis : Long) : PppFrame = {
-          val config_req = new LcpPacket(
-            LcpCode.ConfigureRequest, 0x99.toByte, test_config_req_options)
-          new PppFrame(Protocol.LCP, config_req)
-        }
-        
-        // first get a config-req and then a config-ack
-        override def write_ppp(frame : PppFrame) : Unit = {
-          time_to_call_write_ppp += 1
-          frame.protocol should be (Protocol.LCP)
-          val packet = frame.payload.asInstanceOf[LcpPacket]
-          if(time_to_call_write_ppp == 1)
-            packet.code should be (LcpCode.ConfigureRequest)
-          else if(time_to_call_write_ppp == 2) {
-            packet.code should be (LcpCode.ConfigureAck)
-            packet.identifier should be (0x99.toByte)
-            packet.data should be (test_config_req_options)
-          }
-          // more incoming packets may be retransmit and are neglected
-        }
+      val config_req = new LcpPacket(
+        LcpCode.ConfigureRequest, 0x99.toByte, test_config_req_options)
+
+      val mock_duplex = new MockFrameDuplex 
+
+      mock_duplex.produce(new PppFrame(Protocol.LCP, config_req))
+      mock_duplex.check(frame => {
+        val packet = extract_lcp(frame)
+        packet.code should be (LcpCode.ConfigureRequest)
+      })
+      mock_duplex.check(frame => {
+        val packet = extract_lcp(frame)
+        packet.code should be (LcpCode.ConfigureAck)
+        packet.identifier should be (0x99.toByte)
+        packet.data should be (test_config_req_options)
+      })
+
+      val id_counter = new PppIdCounter(0x10)
+      val automaton = new LcpAutomaton(mock_duplex, id_counter)
+      intercept[SessionTimeoutException] {
+        automaton.open
       }
-      
-      val automaton = new LcpAutomaton(mock_duplex)
-      automaton.open
     }
 
     it("gets ready when received a config-req and then a config-ack") {
-      val mock_duplex = new MockBinaryDuplex {
-        private var time_to_call_read_ppp = 0
-        private var incoming_config_req : LcpPacket = null
+      val config_req = new LcpPacket(
+        LcpCode.ConfigureRequest, 0x01.toByte, test_config_req_options)
+      val config_ack = new LcpPacket(
+        LcpCode.ConfigureAck, 0x11.toByte, Nil)
+      val mock_duplex = new MockFrameDuplex
 
-        override def read_ppp(timeout_millis : Long) : PppFrame = {
-          time_to_call_read_ppp += 1
-          val config_req = new LcpPacket(
-            LcpCode.ConfigureRequest, 0x99.toByte, test_config_req_options)
-          if(time_to_call_read_ppp == 1) 
-            new PppFrame(Protocol.LCP, config_req)
-          else if(time_to_call_read_ppp == 2) {
-            if(incoming_config_req == null)
-              fail("wanting to read Ack without sending Req")
-            else {
-              val config_ack = new LcpPacket(
-                LcpCode.ConfigureAck, 
-                incoming_config_req.identifier,
-                incoming_config_req.data)
-              new PppFrame(Protocol.LCP, config_ack)
-            }
-          }
-          else
-            default_timeout_frame
-        }
-        
-        override def write_ppp(frame : PppFrame) : Unit = {
-          frame.protocol should be (Protocol.LCP)
-          val packet = frame.payload.asInstanceOf[LcpPacket]
-          if(packet.code == LcpCode.ConfigureRequest)
-            incoming_config_req = packet
-        }
-      }
+      mock_duplex.produce(new PppFrame(Protocol.LCP, config_req))
+      mock_duplex.produce(new PppFrame(Protocol.LCP, config_ack))
 
-      val automaton = new LcpAutomaton(mock_duplex)
+      val id_counter = new PppIdCounter(0x10)
+      val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.open
       automaton.state should be (LcpState.Ready)
     }
 
     it("gets ready when received a config-ack and then a config-req") {
-      val mock_duplex = new MockBinaryDuplex {
-        private var time_to_call_read_ppp = 0
-        private var incoming_config_req : LcpPacket = null
+      val config_req = new LcpPacket(
+        LcpCode.ConfigureRequest, 0x01.toByte, test_config_req_options)
+      val config_ack = new LcpPacket(
+        LcpCode.ConfigureAck, 0x11.toByte, Nil)
+      val mock_duplex = new MockFrameDuplex
 
-        override def read_ppp(timeout_millis : Long) : PppFrame = {
-          time_to_call_read_ppp += 1
-          val config_req = new LcpPacket(
-            LcpCode.ConfigureRequest, 0x99.toByte, test_config_req_options)
-          if(time_to_call_read_ppp == 2) 
-            new PppFrame(Protocol.LCP, config_req)
-          else if(time_to_call_read_ppp == 1) {
-            if(incoming_config_req == null)
-              fail("wanting to read Ack without sending Req")
-            else {
-              val config_ack = new LcpPacket(
-                LcpCode.ConfigureAck, 
-                incoming_config_req.identifier,
-                incoming_config_req.data)
-              new PppFrame(Protocol.LCP, config_ack)
-            }
-          }
-          else
-            default_timeout_frame
-        }
-        
-        override def write_ppp(frame : PppFrame) : Unit = {
-          frame.protocol should be (Protocol.LCP)
-          val packet = frame.payload.asInstanceOf[LcpPacket]
-          if(packet.code == LcpCode.ConfigureRequest)
-            incoming_config_req = packet
-        }
-      }
+      mock_duplex.produce(new PppFrame(Protocol.LCP, config_ack))
+      mock_duplex.produce(new PppFrame(Protocol.LCP, config_req))
 
-      val automaton = new LcpAutomaton(mock_duplex)
+      val id_counter = new PppIdCounter(0x10)
+      val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.open
       automaton.state should be (LcpState.Ready)
     }
   }
 
-  describe("chat correctly on closing connection") {
+  describe("on closing connection") {
     it("sends a terminate-req and is closed when get an ack") {
-      val mock_duplex = new MockBinaryDuplex {
-        private var time_to_call_read_ppp = 0
-        private var incoming_terminate_req : LcpPacket = null
+      val terminate_ack = new LcpPacket(
+        LcpCode.TerminateAck, 0x99.toByte, Nil)
+      val mock_duplex = new MockFrameDuplex
+        
+      mock_duplex.produce(new PppFrame(Protocol.LCP, terminate_ack))
+      mock_duplex.check( frame => {
+        val packet = extract_lcp(frame)
+        packet.code should be (LcpCode.TerminateRequest)
+      })
 
-        override def read_ppp(timeout_millis : Long) : PppFrame = {
-          if(incoming_terminate_req == null)
-            fail("wanting to read Ack without sending Req")
-          else {
-            val terminate_ack = new LcpPacket(
-              LcpCode.TerminateAck, 
-              incoming_terminate_req.identifier,
-              Nil)
-            new PppFrame(Protocol.LCP, terminate_ack)
-          }
-        }
-
-        override def write_ppp(frame : PppFrame) : Unit = {
-          frame.protocol should be (Protocol.LCP)
-          val packet = frame.payload.asInstanceOf[LcpPacket]
-          packet.code should be (LcpCode.TerminateRequest)
-          incoming_terminate_req = packet
-        }
-      }
-
-      val automaton = new LcpAutomaton(mock_duplex)
+      val id_counter = new PppIdCounter(0x99)
+      val automaton = new LcpAutomaton(mock_duplex, id_counter)
       automaton.set_state(LcpState.Ready)
       automaton.close
       automaton.state should be (LcpState.Closed)
+    }
+  }
+
+  describe("on timeout") {
+    it("retransmits when timeout") {
+      val terminate_ack = new LcpPacket(
+        LcpCode.TerminateAck, 0x53.toByte, Nil)
+      val mock_duplex = new MockFrameDuplex
+
+      mock_duplex.produce(mock_duplex.default_timeout_frame)
+      mock_duplex.produce(mock_duplex.default_timeout_frame)
+      mock_duplex.produce(new PppFrame(Protocol.LCP, terminate_ack))
+      mock_duplex.check( frame => {
+        val packet = extract_lcp(frame)
+        packet.identifier should be (0x51)
+      })
+      mock_duplex.check( frame => {
+        val packet = extract_lcp(frame)
+        packet.identifier should be (0x52)
+      })
+      mock_duplex.check( frame => {
+        val packet = extract_lcp(frame)
+        packet.identifier should be (0x53)
+      })
+      
+      val id_counter = new PppIdCounter(0x50)
+      val automaton = new LcpAutomaton(mock_duplex, id_counter)
+      automaton.set_state(LcpState.Ready)
+      automaton.close
+    }
+  
+    it("throws SessionTimeoutException when too many retransmits") {
+      val mock_duplex = new MockFrameDuplex
+    
+      val id_counter = new PppIdCounter(0x50)
+      val automaton = new LcpAutomaton(mock_duplex, id_counter)
+      intercept[SessionTimeoutException] {
+        automaton.open
+      }
     }
   }
 }
