@@ -1003,6 +1003,7 @@ object WtpPduType {
   object Ack extends WtpPduType
   object Result extends WtpPduType
   object SegmentedInvoke extends WtpPduType
+  object Nak extends WtpPduType
   object Unknown extends WtpPduType
 }
 
@@ -1024,12 +1025,13 @@ class WtpHeader(val pdu_type : WtpPduType,
     if(pdu_type == WtpPduType.Ack) 
       first_byte +: split_word(tid)
     else {
-      val last_byte = if(pdu_type == WtpPduType.Invoke)
-        transaction_class.toByte
-                      else if(pdu_type == WtpPduType.SegmentedInvoke)
-                        packet_sequence_number.toByte
-                      else 
-                        throw new InvalidComposeException   
+      val last_byte = 
+        if(pdu_type == WtpPduType.Invoke)
+          transaction_class.toByte
+        else if(pdu_type == WtpPduType.SegmentedInvoke)
+          packet_sequence_number.toByte
+        else 
+          throw new InvalidComposeException   
       first_byte +: split_word(tid) :+ last_byte      
     }
   }
@@ -1040,7 +1042,8 @@ object WtpHeader {
   val pdu_type_values = Map[Int, WtpPduType](0x01 -> Invoke,
                                              0x02 -> Result,
                                              0x03 -> Ack,
-                                             0x05 -> SegmentedInvoke)
+                                             0x05 -> SegmentedInvoke,
+                                             0x07 -> Nak)
 
   def get_wtp_pdu_type(bytes : List[Byte]) : WtpPduType = {
     val pdu_type_int = (bytes(0) & 0x78) >>> 3
@@ -1050,23 +1053,86 @@ object WtpHeader {
   def get_tid(bytes : List[Byte]) : Int = {
     byte_list_to_int(bytes.slice(1,3)) & 0x7F
   }
+
+  def get_ttr(bytes : List[Byte]) : Boolean = 
+    ((bytes.head & 0x02) != 0)
+
+  def get_psn(bytes : List[Byte]) : Int = {
+    if(get_wtp_pdu_type(bytes) != SegmentedInvoke)
+      0
+    else
+      bytes(3).toInt
+  }
+
+  def get_rid(bytes : List[Byte]) : Boolean = 
+    ((bytes.head & 0x01) != 0)
+
+  def make_wtp_invoke_fragments(
+    tid : Int, wsp_pdu : List[Byte]) : List[List[Byte]] = {
+    val wsp_fragments = 
+      wsp_pdu.grouped(wtp_max_transmit_unit_size).toList
+    val first_wtp_pdu_header = 
+      new WtpHeader(WtpPduType.Invoke, tid, false, 2, 0)
+    val first_wtp_pdu = first_wtp_pdu_header.bytes ++ wsp_fragments.head
+    // 上面的这个wtp的pdu的确是invoke，但是与函数make_wtp_invoke_pdu
+    // 中不同，因为GTR与TTR两个位都清零了，表示后面有其它的分组，也就
+    // 是其它的fragment。
+
+    // 这个make_wtp_more_pdus可能返回一个空表。它对frag_list中的每一
+    // 个都包上一个wtp的头部，设置好psn序列号。一律设置为后面有其它的
+    // 分组。
+    def make_wtp_more_pdus(wsp_frag_list : List[List[Byte]],
+                           psn : Int) : List[List[Byte]] 
+    // psn = packet sequence number
+    = {
+      if(wsp_frag_list.isEmpty)
+        List[List[Byte]]()
+      else {
+        val wtp_pdu_header = 
+          new WtpHeader(WtpPduType.SegmentedInvoke, tid, false, 0, psn)
+        val wtp_pdu = wtp_pdu_header.bytes ++ wsp_frag_list.head
+        wtp_pdu :: make_wtp_more_pdus(wsp_frag_list.tail, psn + 1)
+      }           
+    }
+
+    val raw_wtp_pdu_list : List[List[Byte]] = 
+      first_wtp_pdu :: make_wtp_more_pdus(wsp_fragments.tail, 1)
+    // raw_wtp_pdu_list所有的分组都指示后面有其它的分组，包括最后一个。
+    // 所以，最后一个分组要调整。这最后一个也可能根本就是第一个，也就
+    // 是说前后一共只有一个分组。下面的代码能够正确地处理这些情况。
+    val last_wtp_pdu = raw_wtp_pdu_list.last
+    val last_wtp_pdu_with_signal = 
+      (last_wtp_pdu.head | 0x02).toByte :: last_wtp_pdu.tail
+    // 以上这是给最后一个分组（可能是第一个invoke，也可能是第二个开始以
+    // 后的segmented invoke）设置TTR位。
+    val wtp_pdu_list = 
+      raw_wtp_pdu_list.init :+ last_wtp_pdu_with_signal
+
+    wtp_pdu_list //这个返回的表就可以直接用udp打包后发送出了。
+  }
 }
 
 sealed abstract class WspPduType 
 object WspPduType {
   object Connect extends WspPduType
   object ConnectReply extends WspPduType
+  object Reply extends WspPduType
   object Disconnect extends WspPduType
+  object Post extends WspPduType
   object Unknown extends WspPduType
 
   val pdu_type_values = Map[Byte, WspPduType](0x01.toByte -> Connect,
                                               0x02.toByte -> ConnectReply,
-                                              0x05.toByte -> Disconnect)
+                                              0x04.toByte -> Reply,
+                                              0x05.toByte -> Disconnect,
+                                              0x60.toByte -> Post)
 
   def value_of(pdu_type : WspPduType) : Byte = {
     pdu_type_values.map(_.swap).apply(pdu_type)
   }
+}
 
+object Wsp {
   def get_wsp_pdu_type(bytes : List[Byte]) : WspPduType = {
     val wtp_pdu_type = WtpHeader.get_wtp_pdu_type(bytes)
     val typebyte = 
@@ -1074,213 +1140,22 @@ object WspPduType {
         bytes(4)
       else
         bytes(3)
-    pdu_type_values.getOrElse(typebyte, Unknown)
-  }
-}
-
-sealed abstract class WspState
-object WspState {
-  object Closed extends WspState
-  object ConnectReqSent extends WspState
-  object Connected extends WspState
-}
-
-class WspAutomaton(val duplex : UdpDuplex) {
-  sealed abstract class WspEvent
-  object WspEvent {
-    object OpenConnection extends WspEvent
-    object ConnectReplyRcvd extends WspEvent
-    object CloseConnection extends WspEvent
-    object SoftTimeout extends WspEvent
-    object HardTimeout extends WspEvent
+    WspPduType.pdu_type_values.getOrElse(typebyte, WspPduType.Unknown)
   }
 
-  import WspAutomaton._
-  import WspState._
-  import WspEvent._
-  
-  abstract class WspAction { def perform : Unit }
+  def make_wsp_mms_post_pdu(data : List[Byte]) : List[Byte] = {
+    val uri = mmsc_url.getBytes.toList
+    val content_type = 
+      "application/vnd.wap.mms-message".getBytes.toList :+ 0x00.toByte
 
-  private var transaction_id : Int = 0
-
-  def get_tid : Int = {
-    transaction_id += 1
-    transaction_id
+    (WspPduType.value_of(WspPduType.Post) ::
+     int_to_uintvar(uri.length) ++
+     int_to_uintvar(content_type.length) ++
+     uri ++
+     content_type ++
+     data)
   }
 
-  // if due to bug, we did not record a session id, then 
-  // this default value is used in a closing request
-  private var session_id : List[Byte] = int_to_uintvar(100000)
-  private var retransmit_counter : Int = max_retransmit_times
-  private var recent_sent_request : List[Byte] = null
-  private var connect_reply_tid : Int = 0
-  private var the_state : WspState = Closed
-  def state = the_state
-  def set_state(s : WspState) : Unit = { the_state = s } // for testing
-
-  val no_op_action = new WspAction { def perform : Unit = {} }
-  val retransmit_request_action = new WspAction {
-    def perform : Unit = {
-      if(recent_sent_request != null) {
-        duplex.write_udp(recent_sent_request)
-      }
-      retransmit_counter -= 1
-      read_from_remote
-    }
-  }
-  val hard_timeout_action = new WspAction {
-    def perform : Unit = {
-      the_state = Closed
-      throw new SessionTimeoutException
-    }
-  }
-  
-  val state_transition_table = Map(
-    (Closed, OpenConnection) -> new WspAction { def perform : Unit = {
-      initialize_retransmit_counter
-      send_connect_invoke
-      the_state = ConnectReqSent
-      read_from_remote
-    }},
-    (ConnectReqSent, ConnectReplyRcvd) -> new WspAction { def perform : Unit = {
-      send_connect_ack
-      the_state = Connected
-    }},
-    (Connected, CloseConnection) -> new WspAction { def perform : Unit = {
-      send_disconnect_invoke
-      the_state = Closed
-      // according to protocol specification, there would not be any acks
-    }},
-    (ConnectReqSent, SoftTimeout) -> retransmit_request_action
-  )
-
-  def read_from_remote : Unit = {
-    val response = duplex.read_udp(request_timeout_interval)
-    
-    if(response.isLeft) {
-      if(response.left.get == "Timeout") {
-        if(retransmit_counter > 0)
-          feed_event(SoftTimeout)
-        else
-          feed_event(HardTimeout)
-      }
-      else
-        read_from_remote // silently discard
-    } 
-    else {
-      val data = response.right.get
-      if(WtpHeader.get_wtp_pdu_type(data) == WtpPduType.Result &&
-         WspPduType.get_wsp_pdu_type(data) == WspPduType.ConnectReply) {
-           connect_reply_tid = WtpHeader.get_tid(data)
-           session_id = get_first_uintvar(data.drop(4))
-           feed_event(ConnectReplyRcvd)
-         }
-      else
-        read_from_remote // silently discard
-    }
-  }
-
-  def feed_event(event : WspEvent) : Unit = {
-    val action = if(event == HardTimeout) {
-      hard_timeout_action
-    } else if(!(state_transition_table contains (state, event))) {
-      no_op_action
-    } else {
-      state_transition_table(state, event)
-    }
-
-    action.perform
-  }
-
-  def connect : Unit = {
-    feed_event(OpenConnection)
-  }
-
-  def disconnect : Unit = {
-    feed_event(CloseConnection)
-  }
-
-  def initialize_retransmit_counter : Unit = {
-    retransmit_counter = max_retransmit_times
-  }
-
-  def send_connect_invoke : Unit = {
-    val wtp_header = new WtpHeader(WtpPduType.Invoke, get_tid, true, 2, 0)
-    
-    val s_sdu_size_hex = 
-      0x81.toByte :: int_to_uintvar(wsp_server_sdu_size_capability)
-    val c_sdu_size_hex = 
-      0x80.toByte :: int_to_uintvar(wsp_client_sdu_size_capability)
-    val capabilities = 
-      ((c_sdu_size_hex.length.toByte :: c_sdu_size_hex) ++
-       (s_sdu_size_hex.length.toByte :: s_sdu_size_hex))        
-    val wsp_connect_pdu = 
-      (WspPduType.value_of(WspPduType.Connect) ::
-       0x10.toByte ::  // version = 1.0 (0x10)
-       int_to_uintvar(capabilities.length) ++ // capabilities length
-       List(0x00.toByte) ++ // headers length
-       capabilities)
-
-    val whole_packet = wtp_header.bytes ++ wsp_connect_pdu
-    recent_sent_request = whole_packet
-    duplex.write_udp(whole_packet)
-  }
-
-  def send_connect_ack : Unit = {
-    val wtp_header = new WtpHeader(
-      WtpPduType.Ack, connect_reply_tid, true, 0, 0)
-    val whole_packet = wtp_header.bytes
-    duplex.write_udp(whole_packet)
-  }
-
-  def send_disconnect_invoke : Unit = {
-    val wtp_header = new WtpHeader(
-      WtpPduType.Invoke, get_tid, true, 0, 0)
-    val wsp_pdu = WspPduType.value_of(WspPduType.Disconnect) :: session_id
-    val whole_packet = wtp_header.bytes ++ wsp_pdu
-    duplex.write_udp(whole_packet)
-  }
-
-/*
-  def connect : Unit = {
-    val tid = get_tid
-    var retransmit_counter = max_retransmit_times
-
-    val wtp_header = new WtpHeader(PduType.Invoke, get_tid, true, 2, 0)
-
-    val s_sdu_size_hex = 
-      0x81.toByte :: int_to_uintvar(wsp_server_sdu_size_capability)
-    val c_sdu_size_hex = 
-      0x80.toByte :: int_to_uintvar(wsp_client_sdu_size_capability)
-    val capabilities = 
-      ((c_sdu_size_hex.length.toByte :: c_sdu_size_hex) ++
-       (s_sdu_size_hex.length.toByte :: s_sdu_size_hex))        
-    val wsp_connect_pdu = 
-      (split_word(0x0110) ++ // pdutype=connect(0x01),version=1.0(0x10)
-       int_to_uintvar(capabilities.length) ++ // capabilities length
-       List(0x00.toByte) ++ // headers length
-       capabilities)
-
-    duplex.write_udp(wtp_header.bytes ++ wsp_connect_pdu)
-
-    val response = duplex.read_udp(request_timeout_interval)
-    println("[ " + to_hex_string(response.right.get) + " ]")
-    session_id = get_first_uintvar(response.right.get.drop(4))
-    println(WtpHeader.get_pdu_type(response.right.get))
-    println(to_hex_string(session_id))
-
-    duplex.write_udp(parse_hex("18") ++ split_word(tid))
-  }
-
-  def disconnect : Unit = {
-    val wtp_header = 0x0A.toByte +: split_word(get_tid) :+ 0x00.toByte
-    duplex.write_udp(wtp_header ++ parse_hex("05") ++ session_id)
-  }
-*/
-}
-
-
-object WspAutomaton {
   // uintvar是wap系列协议中规定的，可变长的int值，字节的最高位为1表示
   // uintvar串未结束，最高位为0表示是uintvar串的最后一个字节。
   def get_first_uintvar(data : List[Byte]) : List[Byte] = {
@@ -1312,3 +1187,231 @@ object WspAutomaton {
     recur(0, sequence)
   }
 }
+
+sealed abstract class WspState
+object WspState {
+  object Closed extends WspState
+  object ConnectReqSent extends WspState
+  object Connected extends WspState
+  object DataSent extends WspState
+}
+
+class WspAutomaton(val duplex : UdpDuplex) {
+  sealed abstract class WspEvent
+  object WspEvent {
+    object OpenConnection extends WspEvent
+    object ConnectReplyRcvd extends WspEvent
+    object CloseConnection extends WspEvent
+    object SendMms extends WspEvent
+    object ReplyRcvd extends WspEvent
+    object AckRcvd extends WspEvent
+    object Nak extends WspEvent
+    object SoftTimeout extends WspEvent
+    object HardTimeout extends WspEvent
+  }
+
+  import Wsp._
+  import WspState._
+  import WspEvent._
+  
+  abstract class WspAction { def perform : Unit }
+
+  private var transaction_id : Int = 0
+
+  def get_tid : Int = {
+    transaction_id += 1
+    transaction_id
+  }
+
+  // if due to bug, we did not record a session id, then 
+  // this default value is used in a closing request
+  private var session_id : List[Byte] = int_to_uintvar(100000)
+  private var retransmit_counter : Int = max_retransmit_times
+  private var recent_sent_request : List[Byte] = null
+  private var received_tid : Int = 0
+  private var the_state : WspState = Closed
+  private var data_to_send : List[Byte] = null
+  private var recent_fragments : List[List[Byte]] = null
+  private var missing_psn_list : List[Byte] = null
+  def state = the_state
+  def set_state(s : WspState) : Unit = { the_state = s } // for testing
+
+  val no_op_action = new WspAction { def perform : Unit = {} }
+  val hard_timeout_action = new WspAction {
+    def perform : Unit = {
+      the_state = Closed
+      throw new SessionTimeoutException
+    }
+  }
+  
+  val state_transition_table = Map(
+    (Closed, OpenConnection) -> new WspAction { def perform : Unit = {
+      initialize_retransmit_counter
+      send_connect_invoke
+      the_state = ConnectReqSent
+      read_from_remote
+    }},
+    (ConnectReqSent, ConnectReplyRcvd) -> new WspAction { def perform : Unit = {
+      send_ack
+      the_state = Connected
+    }},
+    (ConnectReqSent, SoftTimeout) -> new WspAction { def perform : Unit = {
+      val request = 
+        (recent_sent_request.head | 0x01).toByte :: recent_sent_request.tail
+      duplex.write_udp(request)
+      retransmit_counter -= 1
+      read_from_remote
+    }},
+    (Connected, CloseConnection) -> new WspAction { def perform : Unit = {
+      send_disconnect_invoke
+      the_state = Closed
+      // according to protocol specification, there would not be any acks
+    }},
+    (Connected, SendMms) -> new WspAction { def perform : Unit = {
+      if(data_to_send != null) {
+        initialize_retransmit_counter
+        send_data
+        the_state = DataSent
+        read_from_remote
+      }
+    }},
+    (DataSent, ReplyRcvd) -> new WspAction { def perform : Unit = {
+      send_ack
+      the_state = Connected
+    }},
+    (DataSent, SoftTimeout) -> new WspAction { def perform : Unit = {
+      send_data
+      retransmit_counter -= 1
+      read_from_remote
+    }},
+    (DataSent, AckRcvd) -> new WspAction { def perform : Unit = {
+      read_from_remote  // nothing special
+    }},
+    (DataSent, Nak) -> new WspAction { def perform : Unit = {
+      resend_data
+      read_from_remote
+    }}
+  )
+
+  def read_from_remote : Unit = {
+    val response = duplex.read_udp(request_timeout_interval)
+    
+    if(response.isLeft) {
+      if(response.left.get == "Timeout") {
+        if(retransmit_counter > 0)
+          feed_event(SoftTimeout)
+        else
+          feed_event(HardTimeout)
+      }
+      else
+        read_from_remote // silently discard
+    } 
+    else {
+      val data = response.right.get
+      if(WtpHeader.get_wtp_pdu_type(data) == WtpPduType.Result &&
+         Wsp.get_wsp_pdu_type(data) == WspPduType.ConnectReply) {
+           received_tid = WtpHeader.get_tid(data)
+           session_id = get_first_uintvar(data.drop(4))
+           feed_event(ConnectReplyRcvd)
+         }
+      else if(WtpHeader.get_wtp_pdu_type(data) == WtpPduType.Result &&
+              Wsp.get_wsp_pdu_type(data) == WspPduType.Reply) {
+         received_tid = WtpHeader.get_tid(data)
+         feed_event(ReplyRcvd)
+      }
+      else if(WtpHeader.get_wtp_pdu_type(data) == WtpPduType.Nak) {
+        val missing_psn_count = data(3)
+        missing_psn_list = data.drop(4).take(missing_psn_count)
+        feed_event(Nak)
+      }
+      else if(WtpHeader.get_wtp_pdu_type(data) == WtpPduType.Ack) {
+        feed_event(AckRcvd) 
+      }
+      else
+        read_from_remote // silently discard
+    }
+  }
+
+  def feed_event(event : WspEvent) : Unit = {
+    val action = if(event == HardTimeout) {
+      hard_timeout_action
+    } else if(!(state_transition_table contains (state, event))) {
+      no_op_action
+    } else {
+      state_transition_table(state, event)
+    }
+
+    action.perform
+  }
+
+  def connect : Unit = {
+    feed_event(OpenConnection)
+  }
+
+  def disconnect : Unit = {
+    feed_event(CloseConnection)
+  }
+
+  def send_mms(data : List[Byte]) : Unit = {
+    data_to_send = data
+    feed_event(SendMms)
+  }
+
+  def initialize_retransmit_counter : Unit = {
+    retransmit_counter = max_retransmit_times
+  }
+
+  def send_connect_invoke : Unit = {
+    val wtp_header = new WtpHeader(WtpPduType.Invoke, get_tid, true, 2, 0)
+    
+    val s_sdu_size_hex = 
+      0x81.toByte :: int_to_uintvar(wsp_server_sdu_size_capability)
+    val c_sdu_size_hex = 
+      0x80.toByte :: int_to_uintvar(wsp_client_sdu_size_capability)
+    val capabilities = 
+      ((c_sdu_size_hex.length.toByte :: c_sdu_size_hex) ++
+       (s_sdu_size_hex.length.toByte :: s_sdu_size_hex))        
+    val wsp_connect_pdu = 
+      (WspPduType.value_of(WspPduType.Connect) ::
+       0x10.toByte ::  // version = 1.0 (0x10)
+       int_to_uintvar(capabilities.length) ++ // capabilities length
+       List(0x00.toByte) ++ // headers length
+       capabilities)
+
+    val whole_packet = wtp_header.bytes ++ wsp_connect_pdu
+    recent_sent_request = whole_packet
+    duplex.write_udp(whole_packet)
+  }
+
+  def send_ack : Unit = {
+    val wtp_header = new WtpHeader(
+      WtpPduType.Ack, received_tid, true, 0, 0)
+    val whole_packet = wtp_header.bytes
+    duplex.write_udp(whole_packet)
+  }
+
+  def send_disconnect_invoke : Unit = {
+    val wtp_header = new WtpHeader(
+      WtpPduType.Invoke, get_tid, true, 0, 0)
+    val wsp_pdu = WspPduType.value_of(WspPduType.Disconnect) :: session_id
+    val whole_packet = wtp_header.bytes ++ wsp_pdu
+    duplex.write_udp(whole_packet)
+  }
+
+  def send_data : Unit = {
+    val wsp_pdu = Wsp.make_wsp_mms_post_pdu(data_to_send)
+    val fragments = WtpHeader.make_wtp_invoke_fragments(get_tid, wsp_pdu)
+    recent_fragments = fragments
+
+    fragments.foreach(duplex.write_udp)
+  }
+
+  def resend_data : Unit = {
+    missing_psn_list.foreach(i => {
+      val fragment = recent_fragments(i)
+      val new_fragment = (fragment.head | 0x01).toByte :: fragment.tail
+      duplex.write_udp(new_fragment)
+    })
+  }
+}
+
