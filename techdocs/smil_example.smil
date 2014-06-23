@@ -1,0 +1,15 @@
+<smil xmlns="http://www.w3.org/2000/SMIL20/CR/Language">
+<head>
+<layout>
+<root-layout height="208" width="176"/>
+<region id="FRAME" height="100%" width="100%" left="0%" top="0%" fit="scroll"/>
+</layout>
+</head>
+<body>
+<par dur="60s">
+<img src="sudo.gif" region="FRAME"/>
+<text src="sudo.txt" region="FRAME"/>
+<audio src="sudo.mid" repeatCount="1" type="mid"/>
+</par>
+</body>
+</smil>
